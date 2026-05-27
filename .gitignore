@@ -6,3 +6,13 @@ dist/
 build/
 .DS_Store
 Thumbs.db
+
+# Next.js
+frontend/.next/
+frontend/tsconfig.tsbuildinfo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
