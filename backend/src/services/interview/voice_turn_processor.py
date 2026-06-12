@@ -93,6 +93,15 @@ class VoiceTurnState:
             self.bot_speaking = False
             self.current_tts_task = None
 
+        # Check if evaluation completed (state set to COMPLETE by evaluation pipeline)
+        session_data = get_voice_session(self.session_id)
+        if session_data and session_data.get("state") == "COMPLETE":
+            await _send_json(self.ws, {
+                "event": "interview_complete",
+                "report_url": f"/report/{self.session_id}",
+            })
+            return
+
         set_voice_field(self.session_id, "state", "WAITING_FOR_CANDIDATE")
         await _send_json(self.ws, {"event": "turn", "speaker": "candidate"})
         self._start_silence_monitor()
