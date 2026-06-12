@@ -186,56 +186,15 @@ async def _trigger_final_evaluation(
     session_id: str, voice_data: dict[str, Any]
 ) -> None:
     """
-    Hand off to the existing evaluation pipeline.
-    Creates a SessionState and calls llm_service.generate_final_evaluation.
-    Scores persist to Redis; Postgres write deferred to async worker.
+    Hand off to the voice evaluation pipeline.
+    Computes metrics, runs LLM evaluation, persists to PG + Redis.
     """
-    set_voice_field(session_id, "state", "EVALUATING")
-    logger.info("Triggering final evaluation for voice session %s", session_id)
-
+    logger.info("Triggering voice evaluation for session %s", session_id)
     try:
-        from src.services.llm import llm_service
-
-        session = _build_session_state(voice_data)
-        session.session_id = session_id
-
-        # Rebuild question_results from transcript + scores for evaluation
-        scores = json.loads(voice_data.get("running_scores", "{}"))
-        from src.types.interview import QuestionResult
-        questions_raw = json.loads(voice_data.get("questions", "[]"))
-        questions = [Question(**q) for q in questions_raw]
-        transcript_raw = json.loads(voice_data.get("transcript", "[]"))
-
-        for i, q in enumerate(questions):
-            candidate_turns = [
-                t for t in transcript_raw
-                if t.get("speaker") == "candidate"
-            ]
-            answer_text = candidate_turns[i]["text"] if i < len(candidate_turns) else ""
-            session.question_results.append(
-                QuestionResult(
-                    question_id=q.id,
-                    question_text=q.question_text,
-                    topic=q.topic,
-                    answer_text=answer_text,
-                    score=scores.get(q.topic),
-                    score_reasoning=None,
-                )
-            )
-
-        evaluation = await llm_service.generate_final_evaluation(session)
-        set_voice_field(session_id, "state", "COMPLETE")
-        set_voice_field(
-            session_id,
-            "evaluation",
-            evaluation.model_dump_json(),
-        )
-        logger.info(
-            "Voice evaluation complete session=%s score=%.1f",
-            session_id, evaluation.overall_score,
-        )
+        from src.services.interview.voice_evaluation import run_voice_evaluation
+        await run_voice_evaluation(session_id)
     except Exception as exc:
         logger.error(
-            "Final evaluation failed voice session=%s: %s", session_id, exc
+            "Voice evaluation failed session=%s: %s", session_id, exc
         )
         set_voice_field(session_id, "state", "COMPLETE")
