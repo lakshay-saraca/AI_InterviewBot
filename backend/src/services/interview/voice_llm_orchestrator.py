@@ -16,7 +16,7 @@ import json
 import logging
 from typing import Any
 
-from src.lib.anthropic_client import get_anthropic_client, get_model_for_task
+from src.lib.anthropic_client import get_async_anthropic_client, get_model_for_task
 from src.services.audio.voice_session import (
     get_voice_session,
     set_voice_field,
@@ -113,8 +113,8 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
     )
 
     try:
-        client = get_anthropic_client()
-        response = client.messages.create(
+        client = get_async_anthropic_client()
+        response = await client.messages.create(
             model=get_model_for_task("interview"),
             max_tokens=1024,
             system=system_prompt,
