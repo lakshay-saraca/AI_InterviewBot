@@ -250,6 +250,11 @@ export class VoiceCapture {
     } else if (event === 'tts_sentence_complete') {
       // Sentence fully streamed — decode and schedule it for playback
       this._onSentenceComplete();
+    } else if (event === 'interview_complete') {
+      this._setState('idle');
+      this.onControlMessage(data);
+    } else if (event === 'evaluating') {
+      this.onControlMessage(data);
     } else {
       this.onControlMessage(data);
     }
