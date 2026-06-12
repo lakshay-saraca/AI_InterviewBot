@@ -59,7 +59,15 @@ def _format_transcript(voice_data: dict[str, Any]) -> str:
     lines = []
     for t in transcript:
         speaker = "Interviewer" if t.get("speaker") == "bot" else "Candidate"
-        lines.append(f"[{speaker}]: {t.get('text', '')}")
+        ts_raw = t.get("timestamp", "")
+        time_prefix = ""
+        if ts_raw:
+            try:
+                dt = datetime.fromisoformat(ts_raw)
+                time_prefix = f"[{dt.strftime('%H:%M:%S')}] "
+            except (ValueError, TypeError):
+                pass
+        lines.append(f"{time_prefix}[{speaker}]: {t.get('text', '')}")
     return "\n".join(lines)
 
 

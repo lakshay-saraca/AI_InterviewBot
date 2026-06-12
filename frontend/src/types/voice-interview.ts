@@ -2,11 +2,14 @@ export type VoiceCaptureState = "idle" | "speaking" | "processing" | "bot_speaki
 
 export type TurnSpeaker = "candidate" | "bot";
 
+export type TranscriptType = "response" | "question" | "follow_up" | "silence_prompt" | "candidate" | "system";
+
 export interface TranscriptEntry {
   speaker: TurnSpeaker;
   text: string;
   isFinal: boolean;
   timestamp: number;
+  type?: TranscriptType;
 }
 
 export interface VoiceSessionStartRequest {

@@ -155,14 +155,14 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
             return f"{spoken} {COMPLETION_MESSAGE}"
 
         next_q = questions[next_idx]
-        append_transcript_turn(session_id, "bot", next_q.question_text)
+        append_transcript_turn(session_id, "bot", next_q.question_text, entry_type="question")
         spoken = parsed.spoken_text or "Thank you."
         return f"{spoken} {next_q.question_text}"
 
     elif action == "follow_up":
         set_voice_field(session_id, "follow_up_count", follow_up_count + 1)
         append_transcript_turn(
-            session_id, "bot", parsed.spoken_text or "Can you elaborate?"
+            session_id, "bot", parsed.spoken_text or "Can you elaborate?", entry_type="follow_up"
         )
         return parsed.spoken_text or "Could you tell me more about that?"
 
@@ -177,7 +177,7 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
             return COMPLETION_MESSAGE
 
         next_q = questions[next_idx]
-        append_transcript_turn(session_id, "bot", next_q.question_text)
+        append_transcript_turn(session_id, "bot", next_q.question_text, entry_type="question")
         spoken = parsed.spoken_text or "Thank you."
         return f"{spoken} {next_q.question_text}"
 

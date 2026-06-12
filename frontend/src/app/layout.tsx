@@ -19,7 +19,7 @@ export default function RootLayout({
             <a href="/" className="text-xl font-bold text-slate-900">
               AI Interview Bot
             </a>
-            <span className="text-sm text-slate-500">Powered by Claude</span>
+
           </div>
         </nav>
         <main className="max-w-4xl mx-auto px-6 py-8">{children}</main>

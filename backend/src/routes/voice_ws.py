@@ -96,21 +96,45 @@ async def voice_interview_ws(
     # Per-connection state
     deepgram: Optional[DeepgramManager] = None
     stop_event = asyncio.Event()
+    accumulated_text: list[str] = []
+    debounce_task: list[Optional[asyncio.Task]] = [None]  # list for mutability in closure
 
     async def on_transcript(text: str, is_final: bool) -> None:
         """Called by Deepgram on every transcript event."""
+        # Transcript consistency: every text-bearing WebSocket event has a corresponding
+        # Redis write via append_transcript_turn(). Mapping:
+        #   transcript (is_final=True)  -> flush_accumulated -> append "candidate"
+        #   interviewer_prompt          -> silence monitor    -> append "silence_prompt"
+        #   turn (speaker=bot, w/text)  -> stream_response    -> append "response"/"question"/"follow_up"
+        #   turn (speaker=candidate)    -> state signal only, no text, no persistence needed
+
+        # Always send to client immediately for live display
         await _send_json(websocket, {
             "event": "transcript",
             "text": text,
             "is_final": is_final,
+            "type": "candidate",
         })
 
         if is_final:
-            # speech_final=True — persist and trigger LLM (wired in Feature [9])
-            append_transcript_turn(session_id, "candidate", text)
-            set_voice_field(session_id, "state", "PROCESSING")
-            increment_voice_field(session_id, "turn_count")
-            await _process_turn(websocket, session_id, text)
+            accumulated_text.append(text)
+
+            # Cancel existing debounce timer
+            if debounce_task[0] is not None and not debounce_task[0].done():
+                debounce_task[0].cancel()
+
+            async def _flush_accumulated() -> None:
+                await asyncio.sleep(1.5)  # 1.5s debounce window
+                if not accumulated_text:
+                    return
+                full_text = " ".join(accumulated_text)
+                accumulated_text.clear()
+                append_transcript_turn(session_id, "candidate", full_text, entry_type="candidate")
+                set_voice_field(session_id, "state", "PROCESSING")
+                increment_voice_field(session_id, "turn_count")
+                await _process_turn(websocket, session_id, full_text)
+
+            debounce_task[0] = asyncio.create_task(_flush_accumulated())
 
     # Start Deepgram connection
     deepgram = DeepgramManager(session_id=session_id, on_transcript=on_transcript)
@@ -123,6 +147,14 @@ async def voice_interview_ws(
         "session_id": session_id,
         "state": session.get("state", "INITIALIZING"),
     })
+
+    # Send full transcript for reconnect recovery
+    transcript_raw = json.loads(session.get("transcript", "[]"))
+    if transcript_raw:
+        await _send_json(websocket, {
+            "event": "transcript_sync",
+            "transcript": transcript_raw,
+        })
 
     try:
         while True:
@@ -149,6 +181,8 @@ async def voice_interview_ws(
     finally:
         stop_event.set()
         heartbeat_task.cancel()
+        if debounce_task[0] is not None and not debounce_task[0].done():
+            debounce_task[0].cancel()
         if deepgram:
             await deepgram.stop()
         pause_voice_session(session_id)

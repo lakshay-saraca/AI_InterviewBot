@@ -81,8 +81,7 @@ GET  /api/v1/interview/report/{session_id} → full evaluation + transcript
 
 ### LLM Integration
 - Routing (`backend/src/lib/anthropic_client.py`):
-  - `interview` / `evaluation` → `claude-sonnet-4-6`
-  - `follow_up` / `compression` → `claude-haiku-4-5-20251001`
+  - All tasks (`interview`, `evaluation`, `follow_up`, `compression`) → `claude-haiku-4-5-20251001`
 - System prompt: `backend/src/prompts/system_prompt.txt` (file, not hardcoded)
 - Responses: structured XML, parsed deterministically in `response_parser.py`
 - `spoken_text` = candidate-facing. `internal_notes` + `score_update` = internal only. Don't leak across boundary.

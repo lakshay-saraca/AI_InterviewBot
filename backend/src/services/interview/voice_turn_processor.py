@@ -44,6 +44,7 @@ class VoiceTurnState:
         self.current_tts_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
         self.tts = ElevenLabsTTS()
         self._silence_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
+        self._silence_prompt_count = 0
 
     async def handle_barge_in(self) -> None:
         """Cancel current TTS and open mic."""
@@ -69,8 +70,8 @@ class VoiceTurnState:
 
         self.bot_speaking = True
         set_voice_field(self.session_id, "state", "BOT_SPEAKING")
-        await _send_json(self.ws, {"event": "turn", "speaker": "bot"})
-        append_transcript_turn(self.session_id, "bot", text)
+        await _send_json(self.ws, {"event": "turn", "speaker": "bot", "type": "response"})
+        append_transcript_turn(self.session_id, "bot", text, entry_type="response")
 
         async def _play() -> None:
             # Stream sentences strictly one at a time. Streaming them
@@ -115,20 +116,29 @@ class VoiceTurnState:
         if self._silence_task and not self._silence_task.done():
             self._silence_task.cancel()
         self._silence_task = None
+        self._silence_prompt_count = 0
 
     async def _silence_monitor(self) -> None:
         try:
             await asyncio.sleep(SILENCE_PROMPT_SECS)
-            await _send_json(self.ws, {
-                "event": "interviewer_prompt",
-                "text": "Take your time, I'm listening.",
-            })
+            if self._silence_prompt_count < 2:
+                await _send_json(self.ws, {
+                    "event": "interviewer_prompt",
+                    "text": "Take your time, I'm listening.",
+                    "type": "silence_prompt",
+                })
+                append_transcript_turn(self.session_id, "bot", "Take your time, I'm listening.", entry_type="silence_prompt")
+                self._silence_prompt_count += 1
 
             await asyncio.sleep(SILENCE_CHECKIN_SECS - SILENCE_PROMPT_SECS)
-            await _send_json(self.ws, {
-                "event": "interviewer_prompt",
-                "text": "Are you still there?",
-            })
+            if self._silence_prompt_count < 2:
+                await _send_json(self.ws, {
+                    "event": "interviewer_prompt",
+                    "text": "Are you still there?",
+                    "type": "silence_prompt",
+                })
+                append_transcript_turn(self.session_id, "bot", "Are you still there?", entry_type="silence_prompt")
+                self._silence_prompt_count += 1
 
             await asyncio.sleep(SILENCE_STRIKE_SECS - SILENCE_CHECKIN_SECS)
             strikes = increment_voice_field(self.session_id, "silence_strikes")

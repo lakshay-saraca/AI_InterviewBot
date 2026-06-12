@@ -26,9 +26,9 @@ def get_async_anthropic_client() -> anthropic.AsyncAnthropic:
 
 def get_model_for_task(task: str) -> str:
     models = {
-        "interview": "claude-sonnet-4-6",
-        "evaluation": "claude-sonnet-4-6",
+        "interview": "claude-haiku-4-5-20251001",
+        "evaluation": "claude-haiku-4-5-20251001",
         "follow_up": "claude-haiku-4-5-20251001",
         "compression": "claude-haiku-4-5-20251001",
     }
-    return models.get(task, "claude-sonnet-4-6")
+    return models.get(task, "claude-haiku-4-5-20251001")

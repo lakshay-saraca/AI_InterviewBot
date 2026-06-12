@@ -8,6 +8,7 @@ Lock:       voice_session:{session_id}:lock — String, TTL 30s
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -15,17 +16,28 @@ logger = logging.getLogger(__name__)
 VOICE_SESSION_TTL = 14400  # 4 hours
 LOCK_TTL = 30
 
+_redis_client = None
+_use_memory_fallback = False
+
 
 def _client():
     """Return synchronous Redis client (or None for in-memory fallback)."""
+    global _redis_client, _use_memory_fallback
+    if _use_memory_fallback:
+        return None
+    if _redis_client is not None:
+        return _redis_client
     import redis as _redis  # type: ignore[import-untyped]
     url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     try:
         c = _redis.from_url(url, decode_responses=True, socket_connect_timeout=2)
         c.ping()
-        return c
+        _redis_client = c
+        logger.info("Voice sessions connected to Redis at %s", url)
+        return _redis_client
     except Exception as exc:
-        logger.warning("Redis unavailable for voice sessions (%s)", exc)
+        logger.warning("Redis unavailable for voice sessions (%s), using in-memory store", exc)
+        _use_memory_fallback = True
         return None
 
 
@@ -105,7 +117,7 @@ def increment_voice_field(session_id: str, field: str, amount: int = 1) -> int:
     return amount
 
 
-def append_transcript_turn(session_id: str, speaker: str, text: str) -> None:
+def append_transcript_turn(session_id: str, speaker: str, text: str, entry_type: str = "candidate") -> None:
     client = _client()
     if client:
         raw = client.hget(_key(session_id), "transcript") or "[]"
@@ -115,7 +127,12 @@ def append_transcript_turn(session_id: str, speaker: str, text: str) -> None:
         raw = "[]"
 
     turns: list = json.loads(raw)
-    turns.append({"speaker": speaker, "text": text})
+    turns.append({
+        "speaker": speaker,
+        "text": text,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "type": entry_type,
+    })
     serialized = json.dumps(turns)
 
     if client:

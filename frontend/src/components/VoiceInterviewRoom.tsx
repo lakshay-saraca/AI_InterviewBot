@@ -89,7 +89,7 @@ export default function VoiceInterviewRoom({ sessionId, wsUrl }: Props) {
             const withoutPartial = prev.filter((t) => t.isFinal || t.speaker !== "candidate");
             return [
               ...withoutPartial,
-              { speaker: "candidate", text, isFinal: true, timestamp: Date.now() },
+              { speaker: "candidate", text, isFinal: true, timestamp: Date.now(), type: "candidate" },
             ];
           });
         } else {
@@ -99,17 +99,49 @@ export default function VoiceInterviewRoom({ sessionId, wsUrl }: Props) {
 
       vc.onControlMessage = (data) => {
         const event = data.event as string;
+
+        // Task 3.1.1: Handle transcript_sync on reconnect (takes priority)
+        if (event === "transcript_sync") {
+          const syncedTranscript = (data.transcript as Array<any>) || [];
+          setTranscript(
+            syncedTranscript.map((t: any) => ({
+              speaker: t.speaker as import("@/types/voice-interview").TurnSpeaker,
+              text: t.text || "",
+              isFinal: true,
+              timestamp: t.timestamp ? new Date(t.timestamp).getTime() : Date.now(),
+              type: t.type || undefined,
+            }))
+          );
+          setLiveText("");
+          return;
+        }
+
         if (event === "interview_complete") {
           const reportUrl = data.report_url as string;
           router.push(reportUrl);
           return;
         }
-        if (event === "interviewer_prompt" || event === "turn") {
+
+        // Task 2.1.3: Differentiate interviewer_prompt vs turn, suppress silence_prompt
+        const msgType = data.type as string | undefined;
+        if (event === "interviewer_prompt") {
+          if (msgType === "silence_prompt") {
+            // Silence prompts are persisted server-side but not shown in live view
+            return;
+          }
           const text = data.text as string | undefined;
           if (text) {
             setTranscript((prev) => [
               ...prev,
-              { speaker: "bot", text, isFinal: true, timestamp: Date.now() },
+              { speaker: "bot", text, isFinal: true, timestamp: Date.now(), type: (msgType as any) || undefined },
+            ]);
+          }
+        } else if (event === "turn") {
+          const text = data.text as string | undefined;
+          if (text) {
+            setTranscript((prev) => [
+              ...prev,
+              { speaker: "bot", text, isFinal: true, timestamp: Date.now(), type: (msgType as any) || undefined },
             ]);
           }
         }
@@ -220,31 +252,69 @@ export default function VoiceInterviewRoom({ sessionId, wsUrl }: Props) {
               {started ? "Conversation will appear here…" : "Start the interview to begin."}
             </p>
           )}
-          {transcript.map((entry, i) => (
-            <div
-              key={i}
-              className={`flex gap-2 ${entry.speaker === "bot" ? "" : "flex-row-reverse"}`}
-            >
-              <div
-                className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${
-                  entry.speaker === "bot"
-                    ? "bg-violet-600 text-white"
-                    : "bg-green-600 text-white"
-                }`}
-              >
-                {entry.speaker === "bot" ? "AI" : "You"}
-              </div>
-              <div
-                className={`rounded-xl px-3 py-2 text-sm max-w-xs ${
-                  entry.speaker === "bot"
-                    ? "bg-violet-50 text-violet-900"
-                    : "bg-green-50 text-green-900"
-                }`}
-              >
-                {entry.text}
-              </div>
-            </div>
-          ))}
+          {(() => {
+            const displayTranscript = transcript.filter(e => e.type !== "silence_prompt");
+            const baseTime = displayTranscript[0]?.timestamp || 0;
+
+            const formatTime = (ts: number): string | null => {
+              if (!ts || !baseTime) return null;
+              const offset = Math.max(0, Math.floor((ts - baseTime) / 1000));
+              const mins = Math.floor(offset / 60);
+              const secs = offset % 60;
+              return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+            };
+
+            return displayTranscript.map((entry, i) => {
+              const prevSameSpeaker = i > 0 && displayTranscript[i - 1]?.speaker === entry.speaker;
+              const timeLabel = formatTime(entry.timestamp);
+
+              // Type-based styling for bot entries
+              let typeClasses = "";
+              if (entry.type === "question") {
+                typeClasses = "font-medium border-l-2 border-violet-300 pl-2";
+              } else if (entry.type === "follow_up") {
+                typeClasses = "ml-2";
+              }
+
+              return (
+                <div
+                  key={i}
+                  className={`flex gap-2 ${entry.speaker === "bot" ? "" : "flex-row-reverse"} ${prevSameSpeaker ? "mt-1" : ""}`}
+                >
+                  {/* Avatar: show only for first entry in a consecutive same-speaker group */}
+                  {!prevSameSpeaker ? (
+                    <div
+                      className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${
+                        entry.speaker === "bot"
+                          ? "bg-violet-600 text-white"
+                          : "bg-green-600 text-white"
+                      }`}
+                    >
+                      {entry.speaker === "bot" ? "AI" : "You"}
+                    </div>
+                  ) : (
+                    <div className="w-7 flex-shrink-0" />
+                  )}
+                  <div className="flex flex-col gap-0.5 max-w-xs">
+                    <div
+                      className={`rounded-xl px-3 py-2 text-sm ${typeClasses} ${
+                        entry.speaker === "bot"
+                          ? "bg-violet-50 text-violet-900"
+                          : "bg-green-50 text-green-900"
+                      }`}
+                    >
+                      {entry.text}
+                    </div>
+                    {timeLabel && (
+                      <span className={`text-xs text-slate-400 ${entry.speaker === "bot" ? "ml-1" : "mr-1 text-right"}`}>
+                        {timeLabel}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            });
+          })()}
           {liveText && (
             <div className="flex gap-2 flex-row-reverse">
               <div className="w-7 h-7 rounded-full bg-green-600 flex items-center justify-center text-xs font-bold text-white flex-shrink-0">
