@@ -33,6 +33,9 @@ router = APIRouter(tags=["voice"])
 HEARTBEAT_INTERVAL = 30
 ALGORITHM = "HS256"
 
+STT_LOW_CONFIDENCE = 0.65   # below this: ask candidate to repeat
+STT_MID_CONFIDENCE = 0.80   # below this: soft-confirm before processing
+
 
 def _validate_token(token: str, session_id: str) -> dict[str, Any]:
     settings = get_settings()
@@ -99,14 +102,16 @@ async def voice_interview_ws(
     accumulated_text: list[str] = []
     debounce_task: list[Optional[asyncio.Task]] = [None]  # list for mutability in closure
 
-    async def on_transcript(text: str, is_final: bool) -> None:
+    async def on_transcript(text: str, is_final: bool, confidence: float = 1.0) -> None:
         """Called by Deepgram on every transcript event."""
         # Transcript consistency: every text-bearing WebSocket event has a corresponding
         # Redis write via append_transcript_turn(). Mapping:
-        #   transcript (is_final=True)  -> flush_accumulated -> append "candidate"
-        #   interviewer_prompt          -> silence monitor    -> append "silence_prompt"
-        #   turn (speaker=bot, w/text)  -> stream_response    -> append "response"/"question"/"follow_up"
-        #   turn (speaker=candidate)    -> state signal only, no text, no persistence needed
+        #   transcript (is_final=True, high conf)  -> flush_accumulated -> append "candidate"
+        #   transcript (is_final=True, mid conf)   -> soft_confirm      -> append "soft_confirm"
+        #   transcript (is_final=True, low conf)   -> repeat_request    -> append "repeat_request"
+        #   interviewer_prompt                     -> silence monitor   -> append "silence_prompt"
+        #   turn (speaker=bot, w/text)             -> stream_response   -> append "response"/"question"/"follow_up"
+        #   turn (speaker=candidate)               -> state signal only, no text, no persistence needed
 
         # Always send to client immediately for live display
         await _send_json(websocket, {
@@ -114,9 +119,28 @@ async def voice_interview_ws(
             "text": text,
             "is_final": is_final,
             "type": "candidate",
+            "confidence": round(confidence, 3),
         })
 
         if is_final:
+            if confidence < STT_LOW_CONFIDENCE:
+                increment_voice_field(session_id, "low_confidence_retries")
+                await _stream_bot_message(
+                    websocket, session_id,
+                    "I'm sorry, I didn't catch that clearly. Could you please repeat your answer?",
+                    "repeat_request",
+                )
+                return
+
+            if confidence < STT_MID_CONFIDENCE:
+                increment_voice_field(session_id, "soft_confirm_count")
+                await _stream_bot_message(
+                    websocket, session_id,
+                    f"Just to make sure I heard you correctly — you said: {text}?",
+                    "soft_confirm",
+                )
+                return
+
             accumulated_text.append(text)
 
             # Cancel existing debounce timer
@@ -234,3 +258,13 @@ async def _process_turn(ws: WebSocket, session_id: str, transcript: str) -> None
             "message": "I had trouble processing that. Could you repeat?",
         })
         set_voice_field(session_id, "state", "WAITING_FOR_CANDIDATE")
+
+
+async def _stream_bot_message(
+    ws: WebSocket, session_id: str, text: str, entry_type: str
+) -> None:
+    """Stream a bot message through TTS without an LLM call (used for repeat/soft-confirm)."""
+    from src.services.interview.voice_turn_processor import get_or_create_turn_state
+    append_transcript_turn(session_id, "bot", text, entry_type=entry_type)
+    turn_state = get_or_create_turn_state(session_id, ws)
+    await turn_state.stream_response(text)

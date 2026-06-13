@@ -19,6 +19,7 @@ from typing import Any
 from src.lib.anthropic_client import get_async_anthropic_client, get_model_for_task
 from src.services.audio.voice_session import (
     get_voice_session,
+    increment_voice_field,
     set_voice_field,
     append_transcript_turn,
 )
@@ -36,6 +37,8 @@ from src.types.interview import (
 )
 
 logger = logging.getLogger(__name__)
+
+LOW_CONFIDENCE_THRESHOLD = 0.5
 
 COMPLETION_MESSAGE = (
     "That concludes our interview. Thank you so much for your time today. "
@@ -126,17 +129,30 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
         logger.error("LLM call failed session=%s: %s", session_id, exc)
         return "Thank you. Let me continue with the next question."
 
-    # Persist score to Redis
+    # Persist score to Redis — suppress if LLM confidence is too low to trust
     if parsed.score is not None and parsed.score_topic:
-        scores: dict[str, float] = json.loads(
-            voice_data.get("running_scores", "{}")
-        )
-        scores[parsed.score_topic] = parsed.score
-        set_voice_field(session_id, "running_scores", json.dumps(scores))
-        logger.info(
-            "Score recorded session=%s topic=%s score=%.1f",
-            session_id, parsed.score_topic, parsed.score,
-        )
+        if parsed.confidence is not None and parsed.confidence < LOW_CONFIDENCE_THRESHOLD:
+            logger.warning(
+                "Score suppressed (low confidence) session=%s topic=%s score=%.1f confidence=%.2f",
+                session_id, parsed.score_topic, parsed.score, parsed.confidence,
+            )
+            increment_voice_field(session_id, "low_confidence_turns")
+        else:
+            scores: dict[str, float] = json.loads(
+                voice_data.get("running_scores", "{}")
+            )
+            scores[parsed.score_topic] = parsed.score
+            set_voice_field(session_id, "running_scores", json.dumps(scores))
+            logger.info(
+                "Score recorded session=%s topic=%s score=%.1f",
+                session_id, parsed.score_topic, parsed.score,
+            )
+            if parsed.confidence is not None:
+                llm_confs: dict[str, float] = json.loads(
+                    voice_data.get("llm_confidence_by_topic", "{}")
+                )
+                llm_confs[parsed.score_topic] = parsed.confidence
+                set_voice_field(session_id, "llm_confidence_by_topic", json.dumps(llm_confs))
 
     # Advance question or follow-up
     action = parsed.action
@@ -161,6 +177,11 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
 
     elif action == "follow_up":
         set_voice_field(session_id, "follow_up_count", follow_up_count + 1)
+        fu_by_topic: dict[str, int] = json.loads(
+            voice_data.get("follow_ups_by_topic", "{}")
+        )
+        fu_by_topic[current_q.topic] = fu_by_topic.get(current_q.topic, 0) + 1
+        set_voice_field(session_id, "follow_ups_by_topic", json.dumps(fu_by_topic))
         append_transcript_turn(
             session_id, "bot", parsed.spoken_text or "Can you elaborate?", entry_type="follow_up"
         )

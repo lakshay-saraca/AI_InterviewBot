@@ -12,6 +12,7 @@ class ParsedLLMResponse:
     score_topic: Optional[str]
     reasoning: Optional[str]
     next_state: str
+    confidence: Optional[float] = None
     flags: list[str] = field(default_factory=list)
 
 
@@ -64,6 +65,16 @@ def parse_xml_response(raw: str) -> ParsedLLMResponse:
         score_topic = score_elem.findtext("topic", "").strip() or None
         reasoning = score_elem.findtext("reasoning", "").strip() or None
 
+    confidence: Optional[float] = None
+    raw_confidence = root.findtext("confidence", "").strip()
+    if raw_confidence:
+        try:
+            parsed_conf = float(raw_confidence)
+            if 0.0 <= parsed_conf <= 1.0:
+                confidence = parsed_conf
+        except ValueError:
+            pass
+
     flags_text = root.findtext("flags", "").strip()
     flags = [f.strip() for f in flags_text.split(",") if f.strip()]
 
@@ -75,5 +86,6 @@ def parse_xml_response(raw: str) -> ParsedLLMResponse:
         score_topic=score_topic,
         reasoning=reasoning,
         next_state=root.findtext("next_state", "questioning").strip(),
+        confidence=confidence,
         flags=flags,
     )

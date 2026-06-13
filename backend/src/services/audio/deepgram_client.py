@@ -17,7 +17,7 @@ from src.lib.settings import get_settings
 logger = logging.getLogger(__name__)
 
 OnTranscriptCallback = Callable[
-    [str, bool],  # (transcript_text, is_final)
+    [str, bool, float],  # (transcript_text, is_final, confidence)
     Coroutine[Any, Any, None],
 ]
 
@@ -129,6 +129,12 @@ class DeepgramSTTStream:
             text: str = alt.transcript
             is_final: bool = result.is_final
             speech_final: bool = result.speech_final
+            try:
+                confidence = float(alt.confidence)
+                if not (0.0 <= confidence <= 1.0):
+                    confidence = 1.0
+            except (AttributeError, TypeError, ValueError):
+                confidence = 1.0
         except (AttributeError, IndexError):
             return
 
@@ -139,9 +145,9 @@ class DeepgramSTTStream:
             if text == self._last_committed or self._last_committed.startswith(text):
                 return
             self._last_committed = text
-            await self.on_transcript(text, is_final=True)
+            await self.on_transcript(text, True, confidence)
         elif is_final:
-            await self.on_transcript(text, is_final=False)
+            await self.on_transcript(text, False, 1.0)
 
     async def _on_error(self, *args: Any, **_: Any) -> None:
         error = args[0] if args else "unknown"
@@ -208,5 +214,5 @@ class DeepgramManager:
                 await asyncio.sleep(delay)
                 await self._create_and_connect()
 
-    async def _handle_transcript(self, text: str, is_final: bool) -> None:
-        await self.on_transcript(text, is_final)
+    async def _handle_transcript(self, text: str, is_final: bool, confidence: float = 1.0) -> None:
+        await self.on_transcript(text, is_final, confidence)

@@ -30,6 +30,36 @@ logger = logging.getLogger(__name__)
 _PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "voice_evaluation_prompt.txt"
 
 
+def _compute_per_topic_confidence(voice_data: dict[str, Any]) -> dict[str, float]:
+    """
+    Composite confidence per topic from three signals:
+      - LLM self-confidence (0.55 weight): how certain the LLM was when scoring
+      - Follow-up ratio    (0.30 weight): 1.0 if no follow-ups needed, 0 if max used
+      - STT reliability    (0.15 weight): session-wide fraction of turns that cleared the low-confidence gate
+    """
+    running_scores: dict[str, float] = json.loads(voice_data.get("running_scores", "{}"))
+    if not running_scores:
+        return {}
+
+    llm_confs: dict[str, float] = json.loads(voice_data.get("llm_confidence_by_topic", "{}"))
+    fu_by_topic: dict[str, int] = json.loads(voice_data.get("follow_ups_by_topic", "{}"))
+
+    total_turns = max(int(voice_data.get("turn_count", 1)), 1)
+    retries = int(voice_data.get("low_confidence_retries", 0))
+    stt_reliability = max(0.0, 1.0 - (retries / total_turns))
+
+    result: dict[str, float] = {}
+    for topic in running_scores:
+        # 0.7 default: topic was accepted (not suppressed) but confidence not recorded
+        lc = llm_confs.get(topic, 0.7)
+        fu = fu_by_topic.get(topic, 0)
+        follow_up_ratio = max(0.0, 1.0 - (fu / 2.0))  # 0 fu→1.0, 1→0.5, 2→0.0
+        composite = (lc * 0.55) + (follow_up_ratio * 0.30) + (stt_reliability * 0.15)
+        result[topic] = round(composite, 3)
+
+    return result
+
+
 def _compute_metrics(voice_data: dict[str, Any]) -> InterviewMetrics:
     transcript: list[dict] = json.loads(voice_data.get("transcript", "[]"))
     questions: list[dict] = json.loads(voice_data.get("questions", "[]"))
@@ -52,6 +82,7 @@ def _compute_metrics(voice_data: dict[str, Any]) -> InterviewMetrics:
         follow_ups_used=int(voice_data.get("follow_up_count", 0)),
         barge_ins=int(voice_data.get("barge_in_count", 0)),
         silence_strikes=int(voice_data.get("silence_strikes", 0)),
+        per_topic_confidence=_compute_per_topic_confidence(voice_data),
     )
 
 

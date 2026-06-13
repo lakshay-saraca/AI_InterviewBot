@@ -23,6 +23,7 @@ class InterviewMetrics(BaseModel):
     follow_ups_used: int = 0
     barge_ins: int = 0
     silence_strikes: int = 0
+    per_topic_confidence: dict[str, float] = Field(default_factory=dict)
 
 
 class CategoryScore(BaseModel):
