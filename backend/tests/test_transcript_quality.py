@@ -463,3 +463,37 @@ class TestOnTranscriptAccumulation:
 
         assert len(candidate_turns) == 1
         assert candidate_turns[0]["text"] == full_text
+
+    @pytest.mark.asyncio
+    async def test_debounce_resets_on_each_is_final_segment(self):
+        """Each new is_final=True segment must cancel the previous debounce timer
+        and restart it. This prevents premature flush of partial multi-sentence
+        answers when intermediate segments arrive faster than the 1.5s window."""
+        accumulated: list[str] = []
+        debounce_task: list[asyncio.Task | None] = [None]
+        flushed: list[str] = []
+
+        async def flush():
+            await asyncio.sleep(1.5)
+            if accumulated:
+                flushed.append(" ".join(accumulated))
+                accumulated.clear()
+
+        def simulate_is_final(text: str) -> None:
+            accumulated.append(text)
+            if debounce_task[0] is not None and not debounce_task[0].done():
+                debounce_task[0].cancel()
+            debounce_task[0] = asyncio.create_task(flush())
+
+        simulate_is_final("First sentence.")
+        await asyncio.sleep(0.5)
+        assert not flushed, "Flushed too early before debounce window"
+
+        simulate_is_final("Second sentence.")
+        await asyncio.sleep(0.5)
+        assert not flushed, "Flushed between segments — debounce wasn't reset"
+
+        simulate_is_final("Third sentence.")
+        await asyncio.sleep(2.0)
+        assert len(flushed) == 1, f"Expected exactly 1 flush, got {len(flushed)}"
+        assert flushed[0] == "First sentence. Second sentence. Third sentence."
