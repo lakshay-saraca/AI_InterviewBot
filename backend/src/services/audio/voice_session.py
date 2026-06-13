@@ -135,7 +135,13 @@ def increment_voice_field(session_id: str, field: str, amount: int = 1) -> int:
     return amount
 
 
-def append_transcript_turn(session_id: str, speaker: str, text: str, entry_type: str = "candidate") -> None:
+def append_transcript_turn(
+    session_id: str,
+    speaker: str,
+    text: str,
+    entry_type: str = "candidate",
+    question_id: Optional[str] = None,
+) -> None:
     client = _client()
     if client:
         raw = client.hget(_key(session_id), "transcript") or "[]"
@@ -145,12 +151,15 @@ def append_transcript_turn(session_id: str, speaker: str, text: str, entry_type:
         raw = "[]"
 
     turns: list = json.loads(raw)
-    turns.append({
+    turn: dict = {
         "speaker": speaker,
         "text": text,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "type": entry_type,
-    })
+    }
+    if question_id is not None:
+        turn["question_id"] = question_id
+    turns.append(turn)
     serialized = json.dumps(turns)
 
     if client:
