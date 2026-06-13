@@ -12,6 +12,7 @@ from src.routes.health import router as health_router
 from src.routes.interview import router as interview_router
 from src.routes.voice_ws import router as voice_ws_router
 from src.routes.voice_api import router as voice_api_router
+from src.routes.admin import router as admin_router
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -51,3 +52,4 @@ app.include_router(health_router)
 app.include_router(interview_router, prefix="/api/v1")
 app.include_router(voice_ws_router)
 app.include_router(voice_api_router, prefix="/api/v1")
+app.include_router(admin_router, prefix="/api/v1")

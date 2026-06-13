@@ -61,6 +61,7 @@ class QuestionResult(BaseModel):
     score_reasoning: Optional[str] = None
     follow_up_count: int = 0
     time_spent_seconds: Optional[int] = None
+    confidence: Optional[float] = None
 
 
 class Evaluation(BaseModel):

@@ -13,7 +13,13 @@ from src.types.api import (
 from src.types.interview import InterviewState, FinalReport
 from src.services.interview import session_manager, turn_manager
 from src.services.llm import llm_service
-from src.models.interview_report import InterviewReport, get_report_by_session
+from src.models.interview_report import (
+    InterviewReport,
+    InterviewMetrics,
+    InterviewAnalysis,
+    get_report_by_session,
+    save_report as save_report_to_pg,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/interview", tags=["interview"])
@@ -76,6 +82,62 @@ async def submit_answer(body: SubmitAnswerRequest) -> SubmitAnswerResponse:
         session.evaluation = evaluation
         session.state = InterviewState.COMPLETE
         session_manager.end_session(session)
+
+        # Persist to PostgreSQL for history
+        confidences = [
+            qr.confidence for qr in session.question_results
+            if qr.confidence is not None
+        ]
+        avg_eval_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+
+        text_metrics = InterviewMetrics(
+            total_questions=len(session.questions),
+            questions_answered=len(session.question_results),
+            total_candidate_words=sum(
+                len(t.text.split()) for t in session.transcript if t.speaker == "candidate"
+            ),
+            total_bot_words=sum(
+                len(t.text.split()) for t in session.transcript if t.speaker == "bot"
+            ),
+            follow_ups_used=session.follow_up_count,
+            avg_transcription_confidence=1.0,
+            avg_evaluation_confidence=round(avg_eval_confidence, 3),
+            qa_extraction_confidence=1.0,
+        )
+
+        text_analysis = InterviewAnalysis(
+            summary=evaluation.summary,
+            strengths=evaluation.strengths,
+            weaknesses=evaluation.weaknesses,
+            overall_score=evaluation.overall_score,
+            hiring_recommendation=evaluation.recommendation,
+            per_question=[qr.model_dump() for qr in evaluation.per_question],
+            topic_scores=evaluation.topic_scores,
+        )
+
+        started = session.started_at
+        ended = session.ended_at
+        duration = None
+        if started and ended:
+            duration = int(
+                (datetime.fromisoformat(ended) - datetime.fromisoformat(started)).total_seconds()
+            )
+
+        text_report = InterviewReport(
+            session_id=session.session_id,
+            candidate_name=session.candidate_name,
+            job_role=session.job_role,
+            experience_level=session.experience_level.value,
+            interview_type="text",
+            started_at=started,
+            ended_at=ended,
+            duration_seconds=duration,
+            transcript=[t.model_dump() for t in session.transcript],
+            metrics=text_metrics,
+            analysis=text_analysis,
+        )
+
+        await save_report_to_pg(text_report)
 
         return SubmitAnswerResponse(
             session_id=body.session_id,

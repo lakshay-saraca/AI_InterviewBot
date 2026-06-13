@@ -73,6 +73,19 @@ def _compute_metrics(voice_data: dict[str, Any]) -> InterviewMetrics:
     questions_answered = len(candidate_turns)
     avg_duration = 0.0
 
+    per_topic_conf = _compute_per_topic_confidence(voice_data)
+
+    llm_confs: dict[str, float] = json.loads(voice_data.get("llm_confidence_by_topic", "{}"))
+    avg_eval_conf = sum(llm_confs.values()) / len(llm_confs) if llm_confs else 0.0
+
+    total_turns = max(int(voice_data.get("turn_count", 1)), 1)
+    retries = int(voice_data.get("low_confidence_retries", 0))
+    stt_reliability = max(0.0, 1.0 - (retries / total_turns))
+
+    fu_count = int(voice_data.get("follow_up_count", 0))
+    topic_count = max(len(per_topic_conf), 1)
+    qa_extraction = max(0.0, 1.0 - (fu_count / (2.0 * topic_count)))
+
     return InterviewMetrics(
         total_questions=len(questions),
         questions_answered=questions_answered,
@@ -82,7 +95,10 @@ def _compute_metrics(voice_data: dict[str, Any]) -> InterviewMetrics:
         follow_ups_used=int(voice_data.get("follow_up_count", 0)),
         barge_ins=int(voice_data.get("barge_in_count", 0)),
         silence_strikes=int(voice_data.get("silence_strikes", 0)),
-        per_topic_confidence=_compute_per_topic_confidence(voice_data),
+        per_topic_confidence=per_topic_conf,
+        avg_transcription_confidence=round(stt_reliability, 3),
+        avg_evaluation_confidence=round(avg_eval_conf, 3),
+        qa_extraction_confidence=round(qa_extraction, 3),
     )
 
 
@@ -174,6 +190,7 @@ async def run_voice_evaluation(session_id: str) -> InterviewReport:
         candidate_name=voice_data.get("candidate_name", "Candidate"),
         job_role=voice_data.get("job_role", ""),
         experience_level=voice_data.get("experience_level", "mid"),
+        interview_type="voice",
         started_at=voice_data.get("started_at"),
         ended_at=now,
         duration_seconds=None,

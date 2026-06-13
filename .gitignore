@@ -11,6 +11,9 @@ Thumbs.db
 frontend/.next/
 frontend/tsconfig.tsbuildinfo
 
+# SQLite
+backend/data/interviews.db
+
 # Python
 __pycache__/
 *.pyc

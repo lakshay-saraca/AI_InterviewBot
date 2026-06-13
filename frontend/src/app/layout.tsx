@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { AuthProvider } from "@/contexts/AuthContext";
+import Navbar from "@/components/Navbar";
 
 export const metadata: Metadata = {
   title: "AI Interview Bot",
@@ -14,15 +16,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="min-h-screen bg-slate-50">
-        <nav className="bg-white border-b border-slate-200 px-6 py-4">
-          <div className="max-w-4xl mx-auto flex items-center justify-between">
-            <a href="/" className="text-xl font-bold text-slate-900">
-              AI Interview Bot
-            </a>
-
-          </div>
-        </nav>
-        <main className="max-w-4xl mx-auto px-6 py-8">{children}</main>
+        <AuthProvider>
+          <Navbar />
+          <main className="max-w-6xl mx-auto px-4 sm:px-6 py-8">{children}</main>
+        </AuthProvider>
       </body>
     </html>
   );

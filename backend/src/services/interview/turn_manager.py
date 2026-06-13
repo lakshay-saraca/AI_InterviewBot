@@ -106,5 +106,6 @@ def _record_question_result(
         score=llm_result.score,
         score_reasoning=llm_result.reasoning,
         follow_up_count=session.follow_up_count,
+        confidence=llm_result.confidence,
     )
     session.question_results.append(result)

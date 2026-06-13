@@ -7,9 +7,10 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     deepgram_api_key: str = ""
     elevenlabs_api_key: str = ""
-    database_url: str = "postgresql://postgres:dev@localhost:5432/interview_db"
+    database_url: str = ""  # unused — SQLite at data/interviews.db
     redis_url: str = "redis://localhost:6379/0"
     jwt_secret: str = "change-me-in-production"
+    admin_api_key: str = "change-me-admin-key"
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     aws_region: str = "us-east-1"

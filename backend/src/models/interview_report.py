@@ -1,17 +1,21 @@
 """
-Pydantic models and asyncpg helpers for interview_reports table.
-read/write only — no ORM. Direct SQL via asyncpg.
+Pydantic models and aiosqlite helpers for interview_reports table.
+read/write only — no ORM. Direct SQL via aiosqlite.
 """
 
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
+import aiosqlite
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "data", "interviews.db")
 
 
 class InterviewMetrics(BaseModel):
@@ -24,6 +28,9 @@ class InterviewMetrics(BaseModel):
     barge_ins: int = 0
     silence_strikes: int = 0
     per_topic_confidence: dict[str, float] = Field(default_factory=dict)
+    avg_transcription_confidence: float = 1.0
+    avg_evaluation_confidence: float = 0.0
+    qa_extraction_confidence: float = 1.0
 
 
 class CategoryScore(BaseModel):
@@ -61,6 +68,7 @@ class InterviewReport(BaseModel):
     candidate_name: str = "Candidate"
     job_role: str = ""
     experience_level: str = "mid"
+    interview_type: str = "text"
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
     duration_seconds: Optional[int] = None
@@ -70,59 +78,86 @@ class InterviewReport(BaseModel):
     created_at: Optional[str] = None
 
 
-_pool = None
+_db: Optional[aiosqlite.Connection] = None
 
 
-async def _get_pool():
-    global _pool
-    if _pool is None:
-        import asyncpg
-        from src.lib.settings import get_settings
-        settings = get_settings()
-        try:
-            _pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=5)
-        except Exception as exc:
-            logger.error("Failed to create PG pool: %s", exc)
-            return None
-    return _pool
+async def _get_db() -> Optional[aiosqlite.Connection]:
+    global _db
+    if _db is not None:
+        return _db
+    try:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        _db = await aiosqlite.connect(DB_PATH)
+        _db.row_factory = aiosqlite.Row
+        await _init_tables(_db)
+        return _db
+    except Exception as exc:
+        logger.error("Failed to open SQLite DB at %s: %s", DB_PATH, exc)
+        return None
+
+
+async def _init_tables(db: aiosqlite.Connection) -> None:
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS interview_reports (
+            id TEXT PRIMARY KEY,
+            session_id TEXT UNIQUE NOT NULL,
+            candidate_name TEXT NOT NULL DEFAULT 'Candidate',
+            job_role TEXT NOT NULL DEFAULT '',
+            experience_level TEXT NOT NULL DEFAULT 'mid',
+            interview_type TEXT NOT NULL DEFAULT 'text',
+            started_at TEXT,
+            ended_at TEXT,
+            duration_seconds INTEGER,
+            transcript TEXT NOT NULL DEFAULT '[]',
+            metrics TEXT NOT NULL DEFAULT '{}',
+            analysis TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT
+        )
+    """)
+    await db.commit()
 
 
 async def save_report(report: InterviewReport) -> bool:
-    pool = await _get_pool()
-    if pool is None:
-        logger.error("No PG pool — report not saved for session %s", report.session_id)
+    db = await _get_db()
+    if db is None:
+        logger.error("No DB — report not saved for session %s", report.session_id)
         return False
 
     now = datetime.now(timezone.utc).isoformat()
     try:
-        await pool.execute(
+        await db.execute(
             """
             INSERT INTO interview_reports
                 (id, session_id, candidate_name, job_role, experience_level,
-                 started_at, ended_at, duration_seconds,
+                 interview_type, started_at, ended_at, duration_seconds,
                  transcript, metrics, analysis, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            ON CONFLICT (session_id) DO UPDATE SET
-                transcript = EXCLUDED.transcript,
-                metrics = EXCLUDED.metrics,
-                analysis = EXCLUDED.analysis,
-                ended_at = EXCLUDED.ended_at,
-                duration_seconds = EXCLUDED.duration_seconds
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                transcript = excluded.transcript,
+                metrics = excluded.metrics,
+                analysis = excluded.analysis,
+                ended_at = excluded.ended_at,
+                duration_seconds = excluded.duration_seconds,
+                interview_type = excluded.interview_type
             """,
-            uuid.UUID(report.id),
-            report.session_id,
-            report.candidate_name,
-            report.job_role,
-            report.experience_level,
-            datetime.fromisoformat(report.started_at) if report.started_at else None,
-            datetime.fromisoformat(report.ended_at) if report.ended_at else None,
-            report.duration_seconds,
-            json.dumps(report.transcript),
-            report.metrics.model_dump_json(),
-            report.analysis.model_dump_json(),
-            now,
+            (
+                report.id,
+                report.session_id,
+                report.candidate_name,
+                report.job_role,
+                report.experience_level,
+                report.interview_type,
+                report.started_at,
+                report.ended_at,
+                report.duration_seconds,
+                json.dumps(report.transcript),
+                report.metrics.model_dump_json(),
+                report.analysis.model_dump_json(),
+                now,
+            ),
         )
-        logger.info("Report saved to PG for session %s", report.session_id)
+        await db.commit()
+        logger.info("Report saved to SQLite for session %s", report.session_id)
         return True
     except Exception as exc:
         logger.error("Failed to save report session=%s: %s", report.session_id, exc)
@@ -130,36 +165,73 @@ async def save_report(report: InterviewReport) -> bool:
 
 
 async def get_report_by_session(session_id: str) -> Optional[InterviewReport]:
-    pool = await _get_pool()
-    if pool is None:
+    db = await _get_db()
+    if db is None:
         return None
 
     try:
-        row = await pool.fetchrow(
-            "SELECT * FROM interview_reports WHERE session_id = $1",
-            session_id,
+        cursor = await db.execute(
+            "SELECT * FROM interview_reports WHERE session_id = ?",
+            (session_id,),
         )
+        row = await cursor.fetchone()
         if row is None:
             return None
-
-        return InterviewReport(
-            id=str(row["id"]),
-            session_id=row["session_id"],
-            candidate_name=row["candidate_name"],
-            job_role=row["job_role"],
-            experience_level=row["experience_level"],
-            started_at=row["started_at"].isoformat() if row["started_at"] else None,
-            ended_at=row["ended_at"].isoformat() if row["ended_at"] else None,
-            duration_seconds=row["duration_seconds"],
-            transcript=json.loads(row["transcript"]) if isinstance(row["transcript"], str) else row["transcript"],
-            metrics=InterviewMetrics.model_validate_json(
-                row["metrics"] if isinstance(row["metrics"], str) else json.dumps(row["metrics"])
-            ),
-            analysis=InterviewAnalysis.model_validate_json(
-                row["analysis"] if isinstance(row["analysis"], str) else json.dumps(row["analysis"])
-            ),
-            created_at=row["created_at"].isoformat() if row["created_at"] else None,
-        )
+        return _row_to_report(row)
     except Exception as exc:
         logger.error("Failed to read report session=%s: %s", session_id, exc)
         return None
+
+
+def _row_to_report(row) -> InterviewReport:
+    return InterviewReport(
+        id=row["id"],
+        session_id=row["session_id"],
+        candidate_name=row["candidate_name"],
+        job_role=row["job_role"],
+        experience_level=row["experience_level"],
+        interview_type=row["interview_type"] or "text",
+        started_at=row["started_at"],
+        ended_at=row["ended_at"],
+        duration_seconds=row["duration_seconds"],
+        transcript=json.loads(row["transcript"]) if row["transcript"] else [],
+        metrics=InterviewMetrics.model_validate_json(row["metrics"]) if row["metrics"] else InterviewMetrics(),
+        analysis=InterviewAnalysis.model_validate_json(row["analysis"]) if row["analysis"] else InterviewAnalysis(),
+        created_at=row["created_at"],
+    )
+
+
+async def list_reports(
+    limit: int = 20,
+    offset: int = 0,
+) -> tuple[list[InterviewReport], int]:
+    db = await _get_db()
+    if db is None:
+        return [], 0
+
+    try:
+        cursor = await db.execute("SELECT COUNT(*) as cnt FROM interview_reports")
+        count_row = await cursor.fetchone()
+        total = count_row["cnt"] if count_row else 0
+
+        cursor = await db.execute(
+            """
+            SELECT * FROM interview_reports
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        )
+        rows = await cursor.fetchall()
+
+        reports = []
+        for row in rows:
+            try:
+                reports.append(_row_to_report(row))
+            except Exception as exc:
+                logger.warning("Skipping malformed report row: %s", exc)
+
+        return reports, total
+    except Exception as exc:
+        logger.error("Failed to list reports: %s", exc)
+        return [], 0
