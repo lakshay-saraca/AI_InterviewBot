@@ -106,6 +106,18 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
         return COMPLETION_MESSAGE
 
     current_q = questions[current_idx]
+
+    # Record the candidate's answer in the transcript before calling the LLM.
+    # Tagging with question_id allows deterministic Q/A extraction during evaluation
+    # rather than relying on the LLM to infer the mapping from transcript position.
+    append_transcript_turn(
+        session_id,
+        "candidate",
+        transcript,
+        entry_type="candidate",
+        question_id=current_q.id,
+    )
+
     session = _build_session_state(voice_data)
 
     system_prompt = build_system_prompt()

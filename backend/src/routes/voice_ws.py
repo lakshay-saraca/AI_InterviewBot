@@ -109,12 +109,14 @@ async def voice_interview_ws(
         """Called by Deepgram on every transcript event."""
         # Transcript consistency: every text-bearing WebSocket event has a corresponding
         # Redis write via append_transcript_turn(). Mapping:
-        #   transcript (is_final=True, high conf)  -> flush_accumulated -> append "candidate"
+        #   transcript (is_final=True, high conf)  -> flush_accumulated -> run_llm_turn -> append "candidate" with question_id
         #   transcript (is_final=True, mid conf)   -> soft_confirm      -> append "soft_confirm"
         #   transcript (is_final=True, low conf)   -> repeat_request    -> append "repeat_request"
         #   interviewer_prompt                     -> silence monitor   -> append "silence_prompt"
         #   turn (speaker=bot, w/text)             -> stream_response   -> append "response"/"question"/"follow_up"
         #   turn (speaker=candidate)               -> state signal only, no text, no persistence needed
+        # NOTE: candidate answers are appended inside run_llm_turn (with question_id)
+        #       rather than here, so each answer is correctly tagged to its question.
 
         # Always send to client immediately for live display
         await _send_json(websocket, {
@@ -172,7 +174,8 @@ async def voice_interview_ws(
                     return
                 full_text = " ".join(accumulated_text)
                 accumulated_text.clear()
-                append_transcript_turn(session_id, "candidate", full_text, entry_type="candidate")
+                # Candidate answer is stored inside run_llm_turn with question_id;
+                # do not append here to avoid duplicating the turn.
                 set_voice_field(session_id, "state", "PROCESSING")
                 increment_voice_field(session_id, "turn_count")
                 await _process_turn(websocket, session_id, full_text)
