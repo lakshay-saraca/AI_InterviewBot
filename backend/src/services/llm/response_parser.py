@@ -149,7 +149,7 @@ def validate_single_question(spoken_text: str) -> str:
     # Shape B: single terminal '?' with a compound conjunction in the body.
     # Order matters: check longer/more-specific conjunctions before shorter ones
     # to avoid "and also" being split on "and".
-    conjunctions = ["and also", "as well as", "along with", "and"]
+    conjunctions = ["and also", "as well as", "along with"]
     text_lower = spoken_text.lower()
     for conj in conjunctions:
         idx = text_lower.find(conj)

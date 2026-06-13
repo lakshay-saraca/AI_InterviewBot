@@ -22,9 +22,9 @@ def test_single_question_passes_through():
     assert validate_single_question(text) == text
 
 
-def test_compound_question_truncated_at_first():
-    """Two unrelated questions joined by 'and' must be truncated after the first '?'."""
-    text = "Describe your Python experience and tell me about a challenging project?"
+def test_compound_question_with_and_also_truncated():
+    """Two unrelated questions joined by 'and also' must be truncated."""
+    text = "Describe your Python experience, and also tell me about a challenging project?"
     result = validate_single_question(text)
     assert result == "Describe your Python experience?"
 
@@ -72,6 +72,19 @@ def test_empty_string_unchanged():
 def test_no_question_mark_unchanged():
     """A bot acknowledgement with no '?' must pass through unchanged."""
     text = "Thank you for your answer. Let's move on."
+    assert validate_single_question(text) == text
+
+
+def test_bare_and_not_falsely_truncated():
+    """Bare 'and' in a single question must NOT trigger truncation.
+    'What experience do you have with React and Node?' is one question."""
+    text = "What experience do you have with React and Node?"
+    assert validate_single_question(text) == text
+
+
+def test_bare_and_listing_two_topics_unchanged():
+    """A question listing related items with 'and' is a single question."""
+    text = "Can you describe your experience with microservices and distributed systems?"
     assert validate_single_question(text) == text
 
 
