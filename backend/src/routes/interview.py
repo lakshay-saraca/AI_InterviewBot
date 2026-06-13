@@ -12,6 +12,7 @@ from src.types.api import (
 )
 from src.types.interview import InterviewState, FinalReport
 from src.services.interview import session_manager, turn_manager
+from src.services.interview.warmup import generate_warmup_question
 from src.services.llm import llm_service
 from src.models.interview_report import (
     InterviewReport,
@@ -40,19 +41,20 @@ async def start_interview(body: StartInterviewRequest) -> StartInterviewResponse
             detail="No questions available for the selected role and level.",
         )
 
-    session.state = InterviewState.QUESTIONING
-    first_q = session.questions[0]
+    session.state = InterviewState.WARMUP
+    warmup_text = generate_warmup_question(session.candidate_name, session.job_role)
     session_manager.update_session(session)
-    session_manager.record_turn(session, speaker="bot", text=first_q.question_text, question_id=first_q.id)
+    session_manager.record_turn(session, speaker="bot", text=warmup_text)
 
     return StartInterviewResponse(
         session_id=session.session_id,
         state=session.state,
-        question_text=first_q.question_text,
-        question_number=1,
+        question_text=warmup_text,
+        question_number=0,
         total_questions=len(session.questions),
-        topic=first_q.topic,
+        topic="warmup",
         candidate_name=session.candidate_name,
+        is_warmup=True,
     )
 
 
@@ -68,10 +70,27 @@ async def submit_answer(body: SubmitAnswerRequest) -> SubmitAnswerResponse:
     if session.state == InterviewState.EVALUATING:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Interview is being evaluated.")
 
-    if session.state not in (InterviewState.QUESTIONING, InterviewState.STARTED):
+    if session.state not in (InterviewState.QUESTIONING, InterviewState.STARTED, InterviewState.WARMUP):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Cannot submit answer in state: {session.state.value}",
+        )
+
+    if session.state == InterviewState.WARMUP:
+        session_manager.record_turn(session, speaker="candidate", text=body.answer)
+        session.state = InterviewState.QUESTIONING
+        first_q = session.questions[0]
+        session_manager.update_session(session)
+        session_manager.record_turn(session, speaker="bot", text=first_q.question_text, question_id=first_q.id)
+        return SubmitAnswerResponse(
+            session_id=body.session_id,
+            state=InterviewState.QUESTIONING,
+            next_question=first_q.question_text,
+            question_number=1,
+            total_questions=len(session.questions),
+            topic=first_q.topic,
+            is_warmup=True,
+            is_complete=False,
         )
 
     result = await turn_manager.process_answer(session, body.answer)

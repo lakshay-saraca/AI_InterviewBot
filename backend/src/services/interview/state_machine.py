@@ -2,7 +2,8 @@ from src.types.interview import InterviewState
 
 _TRANSITIONS: dict[InterviewState, set[InterviewState]] = {
     InterviewState.IDLE: {InterviewState.STARTED},
-    InterviewState.STARTED: {InterviewState.QUESTIONING},
+    InterviewState.STARTED: {InterviewState.WARMUP, InterviewState.QUESTIONING},
+    InterviewState.WARMUP: {InterviewState.QUESTIONING},
     InterviewState.QUESTIONING: {InterviewState.QUESTIONING, InterviewState.EVALUATING},
     InterviewState.EVALUATING: {InterviewState.COMPLETE},
     InterviewState.COMPLETE: set(),

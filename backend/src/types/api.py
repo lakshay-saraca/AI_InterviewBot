@@ -18,6 +18,7 @@ class StartInterviewResponse(BaseModel):
     total_questions: int
     topic: str
     candidate_name: str
+    is_warmup: bool = False
 
 
 class SubmitAnswerRequest(BaseModel):
@@ -35,6 +36,7 @@ class SubmitAnswerResponse(BaseModel):
     total_questions: Optional[int] = None
     topic: Optional[str] = None
     is_complete: bool = False
+    is_warmup: bool = False
     feedback: Optional[str] = None
 
 

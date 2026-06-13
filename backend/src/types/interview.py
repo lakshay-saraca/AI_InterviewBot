@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 class InterviewState(str, Enum):
     IDLE = "idle"
     STARTED = "started"
+    WARMUP = "warmup"
     QUESTIONING = "questioning"
     EVALUATING = "evaluating"
     COMPLETE = "complete"
