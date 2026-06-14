@@ -199,6 +199,10 @@ class TestStartInterview:
 
 # ---------------------------------------------------------------------------
 # submit_answer in WARMUP state
+#
+# The warmup is now two turns:
+#   turn 1 — candidate answers first warmup question → bot sends follow-up warmup
+#   turn 2 — candidate answers follow-up → bot sends first technical question
 # ---------------------------------------------------------------------------
 
 class TestSubmitWarmupAnswer:
@@ -213,78 +217,139 @@ class TestSubmitWarmupAnswer:
         resp = await start_interview(req)
         return resp.session_id
 
+    async def _submit(self, session_id: str, answer: str):
+        from src.routes.interview import submit_answer
+        return await submit_answer(SubmitAnswerRequest(session_id=session_id, answer=answer))
+
+    # ------------------------------------------------------------------
+    # First warmup turn
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_first_warmup_answer_stays_in_warmup(self, redis_patch):
+        """After the first warmup answer the session must remain in WARMUP.
+
+        WHY: Transitioning immediately skips the second rapport turn — candidates
+             need at least two social exchanges before the technical portion.
+        """
+        session_id = await self._start()
+        resp = await self._submit(session_id, "Doing well, thanks!")
+        assert resp.state == InterviewState.WARMUP
+
+    @pytest.mark.asyncio
+    async def test_first_warmup_answer_is_warmup_true(self, redis_patch):
+        session_id = await self._start()
+        resp = await self._submit(session_id, "Doing well!")
+        assert resp.is_warmup is True
+
+    @pytest.mark.asyncio
+    async def test_first_warmup_followup_contains_candidate_name(self, redis_patch):
+        """Follow-up warmup question must still be personalised."""
+        session_id = await self._start()
+        resp = await self._submit(session_id, "Doing well!")
+        assert "Utkarsh" in resp.next_question
+
+    @pytest.mark.asyncio
+    async def test_first_warmup_followup_not_technical(self, redis_patch):
+        """Follow-up warmup question must not contain technical keywords."""
+        session_id = await self._start()
+        resp = await self._submit(session_id, "Doing well!")
+        q = resp.next_question.lower()
+        for kw in TECHNICAL_KEYWORDS:
+            assert kw not in q, f"Technical keyword '{kw}' found in follow-up: {q!r}"
+
+    @pytest.mark.asyncio
+    async def test_no_score_for_first_warmup_answer(self, redis_patch):
+        session_id = await self._start()
+        resp = await self._submit(session_id, "Doing well!")
+        assert resp.score is None
+
+    @pytest.mark.asyncio
+    async def test_first_warmup_question_number_still_zero(self, redis_patch):
+        """question_number stays 0 until the technical portion starts."""
+        session_id = await self._start()
+        resp = await self._submit(session_id, "Doing well!")
+        assert resp.question_number == 0
+
+    # ------------------------------------------------------------------
+    # Second warmup turn → transition to QUESTIONING
+    # ------------------------------------------------------------------
+
     @pytest.mark.asyncio
     async def test_transitions_to_questioning(self, redis_patch):
-        from src.routes.interview import submit_answer
         session_id = await self._start()
-        ans_req = SubmitAnswerRequest(session_id=session_id, answer="It was great, thanks!")
-        resp = await submit_answer(ans_req)
+        await self._submit(session_id, "Doing well!")
+        resp = await self._submit(session_id, "I worked at Acme Corp last.")
         assert resp.state == InterviewState.QUESTIONING
 
     @pytest.mark.asyncio
     async def test_returns_first_technical_question(self, redis_patch):
-        from src.routes.interview import submit_answer
         session_id = await self._start()
-        ans_req = SubmitAnswerRequest(session_id=session_id, answer="Good day!")
-        resp = await submit_answer(ans_req)
+        await self._submit(session_id, "Doing well!")
+        resp = await self._submit(session_id, "I worked at Acme Corp last.")
         assert resp.next_question == _FAKE_QUESTIONS[0].question_text
 
     @pytest.mark.asyncio
     async def test_question_number_becomes_one(self, redis_patch):
-        from src.routes.interview import submit_answer
         session_id = await self._start()
-        ans_req = SubmitAnswerRequest(session_id=session_id, answer="Good day!")
-        resp = await submit_answer(ans_req)
+        await self._submit(session_id, "Doing well!")
+        resp = await self._submit(session_id, "I worked at Acme Corp last.")
         assert resp.question_number == 1
 
     @pytest.mark.asyncio
     async def test_is_warmup_false_after_transition(self, redis_patch):
-        """Once warmup is consumed, is_warmup should be False — the response
-        carries the first technical question, not a warmup."""
-        from src.routes.interview import submit_answer
+        """Once both warmup turns are consumed, is_warmup must be False."""
         session_id = await self._start()
-        ans_req = SubmitAnswerRequest(session_id=session_id, answer="Good day!")
-        resp = await submit_answer(ans_req)
+        await self._submit(session_id, "Doing well!")
+        resp = await self._submit(session_id, "I worked at Acme Corp last.")
         assert resp.is_warmup is False
 
     @pytest.mark.asyncio
-    async def test_no_score_for_warmup_answer(self, redis_patch):
-        from src.routes.interview import submit_answer
+    async def test_no_score_for_second_warmup_answer(self, redis_patch):
         session_id = await self._start()
-        ans_req = SubmitAnswerRequest(session_id=session_id, answer="Good day!")
-        resp = await submit_answer(ans_req)
+        await self._submit(session_id, "Doing well!")
+        resp = await self._submit(session_id, "I worked at Acme Corp last.")
         assert resp.score is None
+
+    # ------------------------------------------------------------------
+    # Transcript shape
+    # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
     async def test_transcript_order(self, redis_patch):
-        """Transcript must be: bot warmup → candidate answer → bot first technical question."""
-        from src.routes.interview import submit_answer
+        """Transcript: bot(warmup1) → candidate → bot(warmup2) → candidate → bot(technical)."""
         from src.services.interview.session_manager import get_session
         session_id = await self._start()
-        ans_req = SubmitAnswerRequest(session_id=session_id, answer="Doing great!")
-        await submit_answer(ans_req)
+        await self._submit(session_id, "Doing great!")
+        await self._submit(session_id, "I was at Acme Corp.")
 
         session = get_session(session_id)
         assert session is not None
         transcript = session.transcript
-        assert len(transcript) == 3, f"Expected 3 turns, got {len(transcript)}"
-        assert transcript[0].speaker == "bot"
+        assert len(transcript) == 5, f"Expected 5 turns, got {len(transcript)}"
+        assert transcript[0].speaker == "bot"        # first warmup question
         assert transcript[1].speaker == "candidate"
         assert transcript[1].text == "Doing great!"
-        assert transcript[2].speaker == "bot"
-        assert transcript[2].text == _FAKE_QUESTIONS[0].question_text
+        assert transcript[2].speaker == "bot"        # follow-up warmup question
+        assert transcript[3].speaker == "candidate"
+        assert transcript[3].text == "I was at Acme Corp."
+        assert transcript[4].speaker == "bot"        # first technical question
+        assert transcript[4].text == _FAKE_QUESTIONS[0].question_text
+
+    # ------------------------------------------------------------------
+    # Normal flow after warmup
+    # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_second_answer_goes_through_normal_flow(self, redis_patch):
-        """After warmup, subsequent answers go through turn_manager (normal path)."""
+    async def test_third_answer_goes_through_normal_flow(self, redis_patch):
+        """After both warmup turns, answers go through turn_manager (normal path)."""
         from unittest.mock import AsyncMock, patch
         from src.routes.interview import submit_answer
         from src.services.interview import turn_manager
-        from src.types.interview import InterviewState
 
         session_id = await self._start()
-        # consume warmup
-        await submit_answer(SubmitAnswerRequest(session_id=session_id, answer="Good day!"))
+        await self._submit(session_id, "Doing well!")
+        await self._submit(session_id, "I was at Acme Corp.")
 
         mock_result = MagicMock()
         mock_result.state = InterviewState.QUESTIONING

@@ -12,7 +12,7 @@ from src.types.api import (
 )
 from src.types.interview import InterviewState, FinalReport
 from src.services.interview import session_manager, turn_manager
-from src.services.interview.warmup import generate_warmup_question
+from src.services.interview.warmup import generate_warmup_question, generate_warmup_followup
 from src.services.llm import llm_service
 from src.models.interview_report import (
     InterviewReport,
@@ -78,6 +78,23 @@ async def submit_answer(body: SubmitAnswerRequest) -> SubmitAnswerResponse:
 
     if session.state == InterviewState.WARMUP:
         session_manager.record_turn(session, speaker="candidate", text=body.answer)
+
+        if session.warmup_turns_completed == 0:
+            followup = generate_warmup_followup(session.candidate_name, session.job_role)
+            session.warmup_turns_completed = 1
+            session_manager.update_session(session)
+            session_manager.record_turn(session, speaker="bot", text=followup)
+            return SubmitAnswerResponse(
+                session_id=body.session_id,
+                state=InterviewState.WARMUP,
+                next_question=followup,
+                question_number=0,
+                total_questions=len(session.questions),
+                topic="warmup",
+                is_complete=False,
+                is_warmup=True,
+            )
+
         session.state = InterviewState.QUESTIONING
         first_q = session.questions[0]
         session_manager.update_session(session)
@@ -203,9 +220,11 @@ def _report_response_from_interview_report(
 
 @router.get("/report/{session_id}", response_model=GetReportResponse)
 async def get_report(session_id: str) -> GetReportResponse:
+    logger.info("Report lookup started session=%s", session_id)
     # Try text-mode session first (existing behavior)
     session = session_manager.get_session(session_id)
     if session is not None:
+        logger.info("Report lookup matched text session=%s state=%s", session_id, session.state.value)
         if session.state != InterviewState.COMPLETE:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -248,6 +267,7 @@ async def get_report(session_id: str) -> GetReportResponse:
 
     if voice_data is not None:
         state = voice_data.get("state", "")
+        logger.info("Report lookup matched voice session=%s state=%s", session_id, state)
         if state == "EVALUATING":
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -261,12 +281,15 @@ async def get_report(session_id: str) -> GetReportResponse:
 
         report_json = voice_data.get("evaluation_report")
         if report_json:
+            logger.info("Report lookup returning Redis voice report session=%s", session_id)
             report = InterviewReport.model_validate_json(report_json)
             return _report_response_from_interview_report(session_id, report)
 
     # Try PG as last resort
     pg_report = await get_report_by_session(session_id)
     if pg_report is not None:
+        logger.info("Report lookup returning persisted report session=%s", session_id)
         return _report_response_from_interview_report(session_id, pg_report)
 
+    logger.warning("Report lookup failed session=%s", session_id)
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")

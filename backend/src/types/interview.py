@@ -89,6 +89,7 @@ class SessionState(BaseModel):
     running_scores: dict[str, float] = Field(default_factory=dict)
     flags: list[str] = Field(default_factory=list)
     follow_up_count: int = 0
+    warmup_turns_completed: int = 0
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
     evaluation: Optional[Evaluation] = None
