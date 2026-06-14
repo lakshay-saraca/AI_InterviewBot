@@ -225,6 +225,29 @@ class TestStartInterview:
         assert "backend engineer" in resp.question_text
 
     @pytest.mark.asyncio
+    async def test_opening_discloses_time_estimate(self, redis_patch):
+        """Bot must give a time estimate so candidates can pace themselves.
+
+        WHY: Candidates who know the session length manage their energy and detail
+             level better — disclosing the estimate upfront reduces pacing anxiety.
+        """
+        from src.routes.interview import start_interview
+        from src.services.interview.warmup import estimate_session_minutes
+        req = StartInterviewRequest(
+            candidate_name="Utkarsh",
+            job_role="backend engineer",
+            experience_level=ExperienceLevel.MID,
+            required_skills=["python"],
+        )
+        resp = await start_interview(req)
+        expected_minutes = estimate_session_minutes(len(_FAKE_QUESTIONS))
+        assert "minutes" in resp.question_text, "No time unit found in opening"
+        assert str(expected_minutes) in resp.question_text, (
+            f"Expected time estimate '{expected_minutes} minutes' not found.\n"
+            f"Actual opening: {resp.question_text!r}"
+        )
+
+    @pytest.mark.asyncio
     async def test_warmup_question_is_not_technical(self, redis_patch):
         from src.routes.interview import start_interview
         results: list[str] = []
