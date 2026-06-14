@@ -32,6 +32,23 @@ logger = logging.getLogger(__name__)
 SILENCE_PROMPT_SECS = 15
 SILENCE_CHECKIN_SECS = 30
 SILENCE_STRIKE_SECS = 45
+COMPLETION_WAIT_TIMEOUT_SECS = 90.0
+COMPLETION_POLL_INTERVAL_SECS = 0.25
+
+
+async def _wait_for_report_ready(session_id: str) -> bool:
+    deadline = asyncio.get_running_loop().time() + COMPLETION_WAIT_TIMEOUT_SECS
+    while asyncio.get_running_loop().time() < deadline:
+        session_data = get_voice_session(session_id)
+        if session_data is None:
+            return False
+        if session_data.get("evaluation_report"):
+            return True
+        state = session_data.get("state")
+        if state not in {"EVALUATING", "COMPLETE"}:
+            return False
+        await asyncio.sleep(COMPLETION_POLL_INTERVAL_SECS)
+    return False
 
 
 class VoiceTurnState:
@@ -96,13 +113,27 @@ class VoiceTurnState:
             self.bot_speaking = False
             self.current_tts_task = None
 
-        # Check if evaluation completed (state set to COMPLETE by evaluation pipeline)
+        # Final interview turns stay in evaluation mode until the durable report exists.
         session_data = get_voice_session(self.session_id)
         if session_data and session_data.get("state") == "COMPLETE":
             await _send_json(self.ws, {
                 "event": "interview_complete",
                 "report_url": f"/report/{self.session_id}",
             })
+            return
+        if session_data and session_data.get("state") == "EVALUATING":
+            await _send_json(self.ws, {"event": "evaluating"})
+            if await _wait_for_report_ready(self.session_id):
+                await _send_json(self.ws, {
+                    "event": "interview_complete",
+                    "report_url": f"/report/{self.session_id}",
+                })
+            else:
+                logger.error("Voice report wait timed out session=%s", self.session_id)
+                await _send_json(self.ws, {
+                    "event": "error",
+                    "message": "Interview evaluation is taking longer than expected.",
+                })
             return
 
         set_voice_field(self.session_id, "state", "WAITING_FOR_CANDIDATE")

@@ -30,6 +30,7 @@ export default function VoiceInterviewRoom({ sessionId, wsUrl }: Props) {
   const [liveText, setLiveText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [started, setStarted] = useState(false);
+  const [ending, setEnding] = useState(false);
 
   const captureRef = useRef<import("@/lib/voice-capture").VoiceCapture | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -117,9 +118,16 @@ export default function VoiceInterviewRoom({ sessionId, wsUrl }: Props) {
         }
 
         if (event === "interview_complete") {
+          setEnding(true);
+          sessionStorage.removeItem(`voice_session_${sessionId}`);
           const reportUrl = data.report_url as string;
           router.push(reportUrl);
           return;
+        }
+
+        if (event === "session_ending" || event === "evaluating") {
+          setEnding(true);
+          setCaptureState("processing");
         }
 
         // Task 2.1.3: Differentiate interviewer_prompt vs turn, suppress silence_prompt
@@ -147,7 +155,10 @@ export default function VoiceInterviewRoom({ sessionId, wsUrl }: Props) {
         }
       };
 
-      vc.onError = (err) => setError(err.message);
+      vc.onError = (err) => {
+        setEnding(false);
+        setError(err.message);
+      };
 
       await vc.start();
       captureRef.current = vc;
@@ -169,6 +180,7 @@ export default function VoiceInterviewRoom({ sessionId, wsUrl }: Props) {
       }
 
       setStarted(true);
+      setEnding(false);
       rafRef.current = requestAnimationFrame(drawWaveform);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start capture");
@@ -177,11 +189,9 @@ export default function VoiceInterviewRoom({ sessionId, wsUrl }: Props) {
 
   // ---- Stop / cleanup ----
   const handleStop = useCallback(() => {
-    captureRef.current?.stop();
-    captureRef.current = null;
-    cancelAnimationFrame(rafRef.current);
-    setStarted(false);
-    setCaptureState("idle");
+    setError(null);
+    setEnding(true);
+    captureRef.current?.endInterview();
   }, []);
 
   // Cleanup on unmount
@@ -216,9 +226,10 @@ export default function VoiceInterviewRoom({ sessionId, wsUrl }: Props) {
         {started && (
           <button
             onClick={handleStop}
-            className="text-sm text-red-600 hover:text-red-700 font-medium"
+            disabled={ending}
+            className="text-sm text-red-600 hover:text-red-700 font-medium disabled:cursor-not-allowed disabled:text-slate-400"
           >
-            End Interview
+            {ending ? "Ending…" : "End Interview"}
           </button>
         )}
       </div>

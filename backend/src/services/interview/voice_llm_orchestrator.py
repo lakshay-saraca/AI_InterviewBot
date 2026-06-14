@@ -102,7 +102,7 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
     current_idx = int(voice_data.get("current_question_idx", 0))
 
     if current_idx >= len(questions):
-        asyncio.create_task(_trigger_final_evaluation(session_id, voice_data))
+        asyncio.create_task(_trigger_final_evaluation(session_id))
         return COMPLETION_MESSAGE
 
     current_q = questions[current_idx]
@@ -178,7 +178,7 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
         set_voice_field(session_id, "follow_up_count", 0)
 
         if next_idx >= len(questions):
-            asyncio.create_task(_trigger_final_evaluation(session_id, voice_data))
+            asyncio.create_task(_trigger_final_evaluation(session_id))
             spoken = parsed.spoken_text or "Great."
             return f"{spoken} {COMPLETION_MESSAGE}"
 
@@ -206,7 +206,7 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
         set_voice_field(session_id, "follow_up_count", 0)
 
         if next_idx >= len(questions):
-            asyncio.create_task(_trigger_final_evaluation(session_id, voice_data))
+            asyncio.create_task(_trigger_final_evaluation(session_id))
             return COMPLETION_MESSAGE
 
         next_q = questions[next_idx]
@@ -215,17 +215,15 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
         return f"{spoken} {next_q.question_text}"
 
 
-async def _trigger_final_evaluation(
-    session_id: str, voice_data: dict[str, Any]
-) -> None:
+async def _trigger_final_evaluation(session_id: str) -> None:
     """
     Hand off to the voice evaluation pipeline.
     Computes metrics, runs LLM evaluation, persists to PG + Redis.
     """
     logger.info("Triggering voice evaluation for session %s", session_id)
     try:
-        from src.services.interview.voice_evaluation import run_voice_evaluation
-        await run_voice_evaluation(session_id)
+        from src.services.interview.voice_evaluation import finalize_voice_session
+        await finalize_voice_session(session_id)
     except Exception as exc:
         logger.error(
             "Voice evaluation failed session=%s: %s", session_id, exc

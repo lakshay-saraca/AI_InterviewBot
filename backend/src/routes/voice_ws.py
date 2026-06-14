@@ -11,7 +11,7 @@ Disconnect     → pause Redis state, never destroy
 import asyncio
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from jose import JWTError, jwt
@@ -24,8 +24,8 @@ from src.services.audio.voice_session import (
     pause_voice_session,
     resume_voice_session,
     set_voice_field,
-    append_transcript_turn,
 )
+from src.services.interview.voice_evaluation import finalize_voice_session
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["voice"])
@@ -237,6 +237,28 @@ async def voice_interview_ws(
 
             debounce_task[0] = asyncio.create_task(_flush_accumulated())
 
+    async def flush_accumulated_now() -> None:
+        if debounce_task[0] is not None and not debounce_task[0].done():
+            try:
+                if accumulated_text:
+                    debounce_task[0].cancel()
+                    await debounce_task[0]
+                else:
+                    await debounce_task[0]
+                    return
+            except asyncio.CancelledError:
+                pass
+
+        if not accumulated_text:
+            return
+
+        full_text = " ".join(accumulated_text)
+        accumulated_text.clear()
+        set_voice_field(session_id, "state", "PROCESSING")
+        increment_voice_field(session_id, "turn_count")
+        logger.info("Flushing buffered transcript before finalization session=%s", session_id)
+        await _process_turn(websocket, session_id, full_text)
+
     # Start Deepgram connection
     deepgram = DeepgramManager(session_id=session_id, on_transcript=on_transcript)
     await deepgram.start()
@@ -273,6 +295,15 @@ async def voice_interview_ws(
     try:
         while True:
             message = await websocket.receive()
+            message_type = message.get("type")
+
+            if message_type == "websocket.disconnect":
+                logger.info(
+                    "Voice WS disconnect message session=%s code=%s",
+                    session_id,
+                    message.get("code"),
+                )
+                break
 
             if "bytes" in message and message["bytes"]:
                 await deepgram.send(message["bytes"])
@@ -286,21 +317,32 @@ async def voice_interview_ws(
                         "message": "Invalid JSON in control frame",
                     })
                     continue
-                await _handle_control(websocket, session_id, data, debounce_task)
+                should_continue = await _handle_control(
+                    websocket,
+                    session_id,
+                    data,
+                    debounce_task,
+                    flush_accumulated_now,
+                )
+                if not should_continue:
+                    break
 
     except WebSocketDisconnect:
         logger.info("Voice WS disconnected session=%s", session_id)
     except Exception as exc:
         logger.error("Voice WS error session=%s: %s", session_id, exc, exc_info=True)
     finally:
+        from src.services.interview.voice_turn_processor import remove_turn_state
+
         stop_event.set()
         heartbeat_task.cancel()
         if debounce_task[0] is not None and not debounce_task[0].done():
             debounce_task[0].cancel()
         if deepgram:
             await deepgram.stop()
+        remove_turn_state(session_id)
         pause_voice_session(session_id)
-        logger.info("Voice WS paused session=%s", session_id)
+        logger.info("Voice WS connection cleanup finished session=%s", session_id)
 
 
 async def _handle_control(
@@ -308,11 +350,12 @@ async def _handle_control(
     session_id: str,
     data: dict[str, Any],
     debounce_task: list[Optional[asyncio.Task]] = None,  # type: ignore[type-arg]
-) -> None:
+    flush_accumulated_now: Optional[Callable[[], Awaitable[None]]] = None,
+) -> bool:
     event = data.get("event", "")
 
     if event == "pong":
-        return
+        return True
 
     elif event == "speech_start":
         set_voice_field(session_id, "state", "CANDIDATE_SPEAKING")
@@ -324,22 +367,45 @@ async def _handle_control(
         turn_state = get_or_create_turn_state(session_id, ws)
         turn_state.cancel_silence_monitor()
         await _send_json(ws, {"event": "ack", "for": "speech_start"})
+        return True
 
     elif event == "speech_end":
         # Don't set PROCESSING — let the debounce timer decide when processing starts.
         await _send_json(ws, {"event": "ack", "for": "speech_end"})
+        return True
 
     elif event == "tts_complete":
         set_voice_field(session_id, "state", "WAITING_FOR_CANDIDATE")
         await _send_json(ws, {"event": "turn", "speaker": "candidate"})
+        return True
 
     elif event == "barge_in_ack":
         increment_voice_field(session_id, "barge_in_count")
+        return True
 
     elif event == "end_session":
+        logger.info("Voice session end requested session=%s", session_id)
         await _send_json(ws, {"event": "session_ending"})
-        set_voice_field(session_id, "state", "COMPLETE")
+        if flush_accumulated_now is not None:
+            await flush_accumulated_now()
+        await _send_json(ws, {"event": "evaluating"})
+        report = await finalize_voice_session(session_id)
+        if report is None:
+            logger.error("Voice session finalization failed session=%s", session_id)
+            await _send_json(ws, {
+                "event": "error",
+                "message": "Interview finalization failed before the report was ready.",
+            })
+            return False
+        logger.info("Voice session finalized before close session=%s", session_id)
+        await _send_json(ws, {
+            "event": "interview_complete",
+            "report_url": f"/report/{session_id}",
+        })
         await ws.close(code=1000)
+        return False
+
+    return True
 
 
 async def _process_turn(ws: WebSocket, session_id: str, transcript: str) -> None:

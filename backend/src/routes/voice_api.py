@@ -93,6 +93,12 @@ async def start_voice_session(body: VoiceSessionStartRequest, request: Request) 
         required_skills=body.required_skills,
         questions_json=_json.dumps([q.model_dump() for q in questions]),
     )
+    logger.info(
+        "Voice session start created session=%s role=%s experience=%s",
+        session_id,
+        body.job_role,
+        body.experience_level.value,
+    )
 
     token = _issue_token(session_id)
     # Derive WS base from the incoming request so the URL always matches the

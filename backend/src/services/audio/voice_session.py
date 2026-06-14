@@ -101,6 +101,12 @@ def create_voice_session(
         client.expire(_key(session_id), VOICE_SESSION_TTL)
     else:
         _MEMORY[session_id] = dict(data)
+    logger.info(
+        "Voice session created session=%s state=%s questions=%d",
+        session_id,
+        initial_state,
+        len(questions),
+    )
     return data
 
 
@@ -109,8 +115,14 @@ def get_voice_session(session_id: str) -> Optional[dict[str, Any]]:
     client = _client()
     if client:
         raw = client.hgetall(_key(session_id))
-        return raw if raw else None
-    return _MEMORY.get(session_id)
+        if not raw:
+            logger.warning("Voice session lookup missed session=%s", session_id)
+            return None
+        return raw
+    session = _MEMORY.get(session_id)
+    if session is None:
+        logger.warning("Voice session lookup missed session=%s", session_id)
+    return session
 
 
 def set_voice_field(session_id: str, field: str, value: Any) -> None:
@@ -171,10 +183,12 @@ def append_transcript_turn(
 def pause_voice_session(session_id: str) -> None:
     """On client disconnect — pause but preserve state."""
     set_voice_field(session_id, "connection_state", "paused")
+    logger.info("Voice connection paused session=%s", session_id)
 
 
 def resume_voice_session(session_id: str) -> None:
     set_voice_field(session_id, "connection_state", "connected")
+    logger.info("Voice connection resumed session=%s", session_id)
 
 
 def acquire_lock(session_id: str) -> bool:

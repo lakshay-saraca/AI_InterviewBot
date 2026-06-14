@@ -38,6 +38,7 @@ export class VoiceCapture {
   private audioGen = 0;
   private reconnectCount = 0;
   private stopped = false;
+  private endingSession = false;
   private currentState: CaptureState = 'idle';
 
   constructor(wsUrl: string) {
@@ -46,6 +47,7 @@ export class VoiceCapture {
 
   async start(): Promise<void> {
     this.stopped = false;
+    this.endingSession = false;
     this.reconnectCount = 0;
     await this._initAudio();
     this._connectWs();
@@ -54,6 +56,12 @@ export class VoiceCapture {
   stop(): void {
     this.stopped = true;
     this._cleanup();
+  }
+
+  endInterview(): void {
+    this.endingSession = true;
+    this._setState('processing');
+    this._sendControl({ event: 'end_session' });
   }
 
   /** Called when server signals bot is speaking — disables mic sending. */
@@ -223,7 +231,7 @@ export class VoiceCapture {
     };
 
     this.ws.onclose = () => {
-      if (!this.stopped) this._scheduleReconnect();
+      if (!this.stopped && !this.endingSession) this._scheduleReconnect();
     };
 
     this.ws.onerror = () => {
@@ -251,9 +259,12 @@ export class VoiceCapture {
       // Sentence fully streamed — decode and schedule it for playback
       this._onSentenceComplete();
     } else if (event === 'interview_complete') {
+      this.endingSession = true;
       this._setState('idle');
       this.onControlMessage(data);
     } else if (event === 'evaluating') {
+      this.endingSession = true;
+      this._setState('processing');
       this.onControlMessage(data);
     } else {
       this.onControlMessage(data);
