@@ -263,7 +263,7 @@ class TestEvaluationDoesNotBlockResponse:
         # a real evaluation pipeline (LLM call + metrics + DB save = ~10s).
         eval_started = asyncio.Event()
 
-        async def _slow_evaluation(session_id: str, voice_data: dict) -> None:
+        async def _slow_evaluation(session_id: str) -> None:
             eval_started.set()
             await asyncio.sleep(5.0)
             set_voice_field(session_id, "state", "COMPLETE")
