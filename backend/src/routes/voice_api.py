@@ -19,6 +19,7 @@ from src.services.audio.voice_session import (
     create_voice_session,
     get_voice_session,
 )
+from src.services.interview.warmup import generate_introduction
 from src.services.questions.question_bank import get_question_set
 from src.types.interview import ExperienceLevel
 
@@ -85,6 +86,7 @@ async def start_voice_session(body: VoiceSessionStartRequest, request: Request) 
         )
 
     import json as _json
+    intro_text = generate_introduction(body.candidate_name, body.job_role, len(questions))
     create_voice_session(
         session_id=session_id,
         candidate_name=body.candidate_name,
@@ -92,6 +94,7 @@ async def start_voice_session(body: VoiceSessionStartRequest, request: Request) 
         experience_level=body.experience_level.value,
         required_skills=body.required_skills,
         questions_json=_json.dumps([q.model_dump() for q in questions]),
+        intro_text=intro_text,
     )
     logger.info(
         "Voice session start created session=%s role=%s experience=%s",

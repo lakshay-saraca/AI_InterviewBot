@@ -59,6 +59,7 @@ def create_voice_session(
     experience_level: str,
     required_skills: list[str],
     questions_json: str = "[]",
+    intro_text: str = "",
 ) -> dict[str, Any]:
     """Create initial voice session hash in Redis."""
     now = datetime.now(timezone.utc).isoformat()
@@ -70,9 +71,10 @@ def create_voice_session(
     if questions:
         first_q_text = questions[0].get("question_text", "")
         if first_q_text:
+            entry_text = f"{intro_text} {first_q_text}".strip() if intro_text else first_q_text
             transcript.append({
                 "speaker": "bot",
-                "text": first_q_text,
+                "text": entry_text,
                 "timestamp": now,
                 "type": "question",
             })

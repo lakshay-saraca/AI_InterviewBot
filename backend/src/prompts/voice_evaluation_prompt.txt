@@ -36,19 +36,19 @@ Also provide:
 - Per-question scores from the running scores provided
 
 Respond in this exact JSON format (no markdown, no extra text):
-{
+{{
   "summary": "...",
   "strengths": ["...", "..."],
   "weaknesses": ["...", "..."],
-  "communication_clarity": {"score": N, "explanation": "...", "evidence": "..."},
-  "technical_depth": {"score": N, "explanation": "...", "evidence": "..."},
-  "confidence_consistency": {"score": N, "explanation": "...", "evidence": "..."},
-  "relevance": {"score": N, "explanation": "...", "evidence": "..."},
+  "communication_clarity": {{"score": N, "explanation": "...", "evidence": "..."}},
+  "technical_depth": {{"score": N, "explanation": "...", "evidence": "..."}},
+  "confidence_consistency": {{"score": N, "explanation": "...", "evidence": "..."}},
+  "relevance": {{"score": N, "explanation": "...", "evidence": "..."}},
   "overall_score": N.N,
-  "best_answer": {"question": "...", "summary": "...", "why": "..."},
-  "weakest_answer": {"question": "...", "summary": "...", "why": "..."},
+  "best_answer": {{"question": "...", "summary": "...", "why": "..."}},
+  "weakest_answer": {{"question": "...", "summary": "...", "why": "..."}},
   "red_flags": ["...", "..."],
   "hiring_recommendation": "...",
-  "per_question": [{"question_id": "...", "question_text": "...", "topic": "...", "answer_text": "...", "score": N, "score_reasoning": "..."}],
-  "topic_scores": {"topic_name": N.N}
-}
+  "per_question": [{{"question_id": "...", "question_text": "...", "topic": "...", "answer_text": "...", "score": N, "score_reasoning": "..."}}],
+  "topic_scores": {{"topic_name": N.N}}
+}}
