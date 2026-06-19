@@ -30,5 +30,6 @@ def get_model_for_task(task: str) -> str:
         "evaluation": "claude-haiku-4-5-20251001",
         "follow_up": "claude-haiku-4-5-20251001",
         "compression": "claude-haiku-4-5-20251001",
+        "jd_analysis": "claude-haiku-4-5-20251001",
     }
     return models.get(task, "claude-haiku-4-5-20251001")
