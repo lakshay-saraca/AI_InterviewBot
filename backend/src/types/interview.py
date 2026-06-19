@@ -9,6 +9,7 @@ class InterviewState(str, Enum):
     STARTED = "started"
     WARMUP = "warmup"
     QUESTIONING = "questioning"
+    WRAP_UP = "wrap_up"
     EVALUATING = "evaluating"
     COMPLETE = "complete"
 
@@ -93,6 +94,10 @@ class SessionState(BaseModel):
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
     evaluation: Optional[Evaluation] = None
+    interview_config_id: Optional[str] = None
+    jd_summary: Optional[dict] = None
+    resume_details: Optional[dict] = None  # whitelisted subset only (skills, current_company)
+    outro_questions_used: int = 0
 
 
 class FinalReport(BaseModel):

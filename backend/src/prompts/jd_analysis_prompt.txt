@@ -1,0 +1,21 @@
+You are analyzing a job description to prepare a technical interview.
+
+Extract the following and return ONLY a single valid JSON object, no prose:
+
+{
+  "skills": ["up to 8 concrete technical skills/technologies named or strongly implied"],
+  "responsibilities": ["3-6 core responsibilities"],
+  "seniority_signals": ["phrases indicating seniority/scope expectations"],
+  "jd_questions": [
+    {"question_text": "a role-specific technical question grounded in THIS job description", "topic": "short topic label"}
+  ]
+}
+
+Rules:
+- Produce at least {min_questions} entries in "jd_questions".
+- Questions must be technical and specific to the job description.
+- Never ask about family, age, gender, nationality, religion, or other personal/protected-class topics.
+- Return ONLY the JSON object.
+
+Job description:
+{job_description}

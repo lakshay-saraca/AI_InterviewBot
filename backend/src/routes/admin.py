@@ -1,8 +1,23 @@
 import logging
+import uuid
 from fastapi import APIRouter, HTTPException, Header, Depends, Query, status
 from src.lib.settings import get_settings
-from src.types.admin import InterviewListResponse, InterviewSummary, InterviewDetailResponse
+from src.types.admin import (
+    InterviewListResponse,
+    InterviewSummary,
+    InterviewDetailResponse,
+    CreateConfigRequest,
+    ConfigResponse,
+    ConfigListResponse,
+)
+from src.types.config import InterviewConfig
 from src.models.interview_report import list_reports, get_report_by_session
+from src.models.interview_config import (
+    save_config,
+    list_configs as list_configs_store,
+)
+from src.services.llm.jd_analysis import analyze_jd, JDAnalysisError
+from src.services.interview.plan_builder import build_plan, InsufficientQuestionsError
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +31,79 @@ async def require_admin(x_admin_key: str = Header(default="")) -> None:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing admin API key.",
         )
+
+
+@router.post(
+    "/configs",
+    response_model=ConfigResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_admin)],
+)
+async def create_config(body: CreateConfigRequest) -> ConfigResponse:
+    # JD analysis (LLM, extraction). Fail loud — do NOT persist a half-built config.
+    try:
+        jd_summary, jd_ideas = analyze_jd(body.job_description)
+    except JDAnalysisError as exc:
+        logger.error("JD analysis failed: %s", exc)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail="Could not analyze the job description. Try again.")
+
+    # Build the frozen plan deterministically.
+    try:
+        plan = build_plan(
+            role=body.role,
+            experience_level=body.experience_level,
+            jd_summary=jd_summary,
+            jd_question_ideas=jd_ideas,
+            total_questions=body.total_questions,
+            core_ratio=body.core_question_ratio,
+        )
+    except InsufficientQuestionsError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    config = InterviewConfig(
+        id=str(uuid.uuid4()),
+        title=body.title,
+        role=body.role,
+        experience_level=body.experience_level,
+        job_description=body.job_description,
+        total_questions=body.total_questions,
+        core_question_ratio=body.core_question_ratio,
+        jd_summary=jd_summary,
+        interview_plan=plan,
+    )
+
+    if not await save_config(config):
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail="Failed to persist the interview config.")
+
+    return ConfigResponse(
+        id=config.id, title=config.title, role=config.role,
+        experience_level=config.experience_level.value,
+        total_questions=config.total_questions,
+        core_question_ratio=config.core_question_ratio,
+        created_at=config.created_at,
+    )
+
+
+@router.get(
+    "/configs",
+    response_model=ConfigListResponse,
+    dependencies=[Depends(require_admin)],
+)
+async def list_configs() -> ConfigListResponse:
+    configs = await list_configs_store()
+    summaries = [
+        ConfigResponse(
+            id=c.id, title=c.title, role=c.role,
+            experience_level=c.experience_level.value,
+            total_questions=c.total_questions,
+            core_question_ratio=c.core_question_ratio,
+            created_at=c.created_at,
+        )
+        for c in configs
+    ]
+    return ConfigListResponse(configs=summaries, total=len(summaries))
 
 
 @router.get(
