@@ -30,3 +30,14 @@ def test_split_invariants(total):
     assert core >= 1
     assert jd >= 1
     assert core + jd + 2 == total  # 2 reserved slots
+
+
+@pytest.mark.parametrize("total", [4, 5, 6, 7, 8, 9, 10, 15, 20])
+@pytest.mark.parametrize("ratio", [0.05, 0.2, 0.5, 0.8, 0.95])
+def test_floors_hold_across_full_ratio_band(total, ratio):
+    # core_question_ratio is validated as gt=0/lt=1, so a JD-heavy ratio (e.g. 0.05)
+    # must still leave at least one core question — both counts are floored at 1.
+    core, jd = compute_split(total, ratio)
+    assert core >= 1
+    assert jd >= 1
+    assert core + jd + 2 == total
