@@ -169,8 +169,12 @@ async def start_voice_session_from_jd(
             core_ratio=VOICE_CORE_RATIO,
         )
     except InsufficientQuestionsError as exc:
+        # Log the internal counts but return a sanitized message — the raw text
+        # ("Bank supplied 1 core questions, need 3") leaks bank config to the client.
+        logger.warning("Voice JD plan could not be built: %s", exc)
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Not enough questions available to build the interview from this role and JD.",
         )
 
     session_id = str(uuid.uuid4())

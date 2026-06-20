@@ -32,6 +32,14 @@ class _Req:
     url = _Url()
 
 
+def _no_session_stored() -> bool:
+    # conftest's autouse fixture forces the in-memory store and clears it per test,
+    # so an empty store proves no half-built session was persisted before the error.
+    from src.services.audio.voice_session import _MEMORY
+
+    return len(_MEMORY) == 0
+
+
 @pytest.mark.asyncio
 async def test_wrong_admin_key_rejected_before_llm():
     from src.routes.admin import require_admin
@@ -87,6 +95,7 @@ async def test_unreadable_file_returns_422():
                 job_role="Backend Engineer", experience_level=ExperienceLevel.MID,
             )
     assert exc.value.status_code == 422
+    assert _no_session_stored()
 
 
 @pytest.mark.asyncio
@@ -103,6 +112,7 @@ async def test_jd_analysis_failure_returns_502():
                 job_role="Backend Engineer", experience_level=ExperienceLevel.MID,
             )
     assert exc.value.status_code == 502
+    assert _no_session_stored()
 
 
 @pytest.mark.asyncio
@@ -121,3 +131,16 @@ async def test_insufficient_questions_returns_422():
                 job_role="Backend Engineer", experience_level=ExperienceLevel.MID,
             )
     assert exc.value.status_code == 422
+    assert _no_session_stored()
+    # And the leaked internal count must not reach the client.
+    assert "need" not in (exc.value.detail or "").lower()
+
+
+def test_voice_defaults_yield_two_jd_questions():
+    # Locks the feature's core promise: the voice constants split the technical
+    # pool into 2 core + 2 JD questions (reviewer's "core=3, jd=1" was wrong).
+    from src.routes.voice_api import VOICE_TOTAL_QUESTIONS, VOICE_CORE_RATIO
+    from src.services.interview.plan_math import compute_split
+
+    core_count, jd_count = compute_split(VOICE_TOTAL_QUESTIONS, VOICE_CORE_RATIO)
+    assert (core_count, jd_count) == (2, 2)
