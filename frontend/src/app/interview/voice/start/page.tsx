@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { startVoiceSession } from "@/services/voice-api";
+import AdminGuard from "@/components/AdminGuard";
+import { startVoiceSessionFromJd } from "@/services/voice-api";
 import { ApiClientError } from "@/services/api";
 import type { ExperienceLevel } from "@/types/interview";
 
@@ -29,7 +30,7 @@ export default function VoiceStartPage() {
   const [jobRole, setJobRole] = useState(ROLES[2]);
   const [customRole, setCustomRole] = useState("");
   const [experienceLevel, setExperienceLevel] = useState<ExperienceLevel>("mid");
-  const [skillsInput, setSkillsInput] = useState("");
+  const [jdFile, setJdFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -41,21 +42,21 @@ export default function VoiceStartPage() {
       setError("Please specify a job role.");
       return;
     }
+    if (!jdFile) {
+      setError("Please upload a job description (PDF or DOCX).");
+      return;
+    }
     setLoading(true);
     setError(null);
 
-    const skills = skillsInput
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const form = new FormData();
+    form.append("file", jdFile);
+    form.append("candidate_name", candidateName.trim() || "Candidate");
+    form.append("job_role", effectiveRole);
+    form.append("experience_level", experienceLevel);
 
     try {
-      const res = await startVoiceSession({
-        candidate_name: candidateName.trim() || "Candidate",
-        job_role: effectiveRole,
-        experience_level: experienceLevel,
-        required_skills: skills,
-      });
+      const res = await startVoiceSessionFromJd(form);
       // Store WS URL and token for the room
       sessionStorage.setItem(
         `voice_session_${res.session_id}`,
@@ -73,6 +74,7 @@ export default function VoiceStartPage() {
   };
 
   return (
+    <AdminGuard>
     <div className="max-w-xl mx-auto">
       <div className="flex items-center gap-3 mb-6">
         <span className="text-3xl">🎙</span>
@@ -144,16 +146,18 @@ export default function VoiceStartPage() {
 
         <div>
           <label className="block text-sm font-medium text-slate-700 mb-1">
-            Key Skills <span className="text-slate-400 font-normal">(optional)</span>
+            Job Description <span className="text-red-500">*</span>
           </label>
           <input
-            type="text"
-            value={skillsInput}
-            onChange={(e) => setSkillsInput(e.target.value)}
-            placeholder="e.g. React, Node.js, PostgreSQL"
-            className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500"
+            type="file"
+            accept=".pdf,.docx"
+            onChange={(e) => setJdFile(e.target.files?.[0] ?? null)}
+            className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500 file:mr-4 file:rounded-md file:border-0 file:bg-violet-50 file:px-3 file:py-1.5 file:text-violet-700"
+            required
           />
-          <p className="text-xs text-slate-400 mt-1">Comma-separated</p>
+          <p className="text-xs text-slate-400 mt-1">
+            PDF or DOCX. The interview&apos;s questions are generated from this.
+          </p>
         </div>
 
         {error && (
@@ -171,5 +175,6 @@ export default function VoiceStartPage() {
         </button>
       </form>
     </div>
+    </AdminGuard>
   );
 }
