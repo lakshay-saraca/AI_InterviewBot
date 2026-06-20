@@ -5,21 +5,26 @@ POST /api/v1/voice/session/start  — create session, return token + session_id
 GET  /api/v1/voice/session/{id}   — rehydrate session state (for reconnect)
 """
 
+import json as _json
 import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from jose import jwt
 from pydantic import BaseModel
 
+from src.lib.jd_extract import extract_jd_text, JDExtractError
 from src.lib.settings import get_settings
+from src.routes.admin import require_admin
 from src.services.audio.voice_session import (
     create_voice_session,
     get_voice_session,
 )
+from src.services.interview.plan_builder import build_plan, InsufficientQuestionsError
 from src.services.interview.warmup import generate_introduction
+from src.services.llm.jd_analysis import analyze_jd, JDAnalysisError
 from src.services.questions.question_bank import get_question_set
 from src.types.interview import ExperienceLevel
 
@@ -85,7 +90,6 @@ async def start_voice_session(body: VoiceSessionStartRequest, request: Request) 
             detail="No questions available for the selected role and level.",
         )
 
-    import json as _json
     intro_text = generate_introduction(body.candidate_name, body.job_role, len(questions))
     create_voice_session(
         session_id=session_id,
@@ -107,6 +111,85 @@ async def start_voice_session(body: VoiceSessionStartRequest, request: Request) 
     # Derive WS base from the incoming request so the URL always matches the
     # server the browser is actually talking to. VOICE_WS_BASE overrides for
     # cases where the public WS hostname differs from the API hostname.
+    ws_base = os.getenv("VOICE_WS_BASE")
+    if not ws_base:
+        scheme = "wss" if request.url.scheme == "https" else "ws"
+        ws_base = f"{scheme}://{request.url.netloc}"
+
+    return VoiceSessionStartResponse(
+        session_id=session_id,
+        token=token,
+        state="INITIALIZING",
+        ws_url=f"{ws_base}/ws/interview/voice/{session_id}?token={token}",
+    )
+
+
+VOICE_TOTAL_QUESTIONS = 6
+VOICE_CORE_RATIO = 0.5  # -> 2 JD questions + 2 core bank + behavioral + project
+
+
+@router.post(
+    "/session/start-from-jd",
+    response_model=VoiceSessionStartResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_admin)],
+)
+async def start_voice_session_from_jd(
+    request: Request,
+    file: UploadFile = File(...),
+    candidate_name: str = Form("Candidate"),
+    job_role: str = Form(...),
+    experience_level: ExperienceLevel = Form(ExperienceLevel.MID),
+) -> VoiceSessionStartResponse:
+    data = await file.read()
+    try:
+        jd_text = extract_jd_text(file.filename or "", data)
+    except JDExtractError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Could not read the job description file.",
+        )
+
+    try:
+        jd_summary, jd_ideas = analyze_jd(jd_text)
+    except JDAnalysisError as exc:
+        logger.error("Voice JD analysis failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not analyze the job description. Try again.",
+        )
+
+    try:
+        plan = build_plan(
+            role=job_role,
+            experience_level=experience_level,
+            jd_summary=jd_summary,
+            jd_question_ideas=jd_ideas,
+            total_questions=VOICE_TOTAL_QUESTIONS,
+            core_ratio=VOICE_CORE_RATIO,
+        )
+    except InsufficientQuestionsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        )
+
+    session_id = str(uuid.uuid4())
+    intro_text = generate_introduction(candidate_name, job_role, len(plan.questions))
+    create_voice_session(
+        session_id=session_id,
+        candidate_name=candidate_name,
+        job_role=job_role,
+        experience_level=experience_level.value,
+        required_skills=jd_summary.skills,
+        questions_json=_json.dumps([q.model_dump() for q in plan.questions]),
+        intro_text=intro_text,
+    )
+    logger.info(
+        "Voice JD session created session=%s role=%s questions=%d",
+        session_id, job_role, len(plan.questions),
+    )
+
+    token = _issue_token(session_id)
     ws_base = os.getenv("VOICE_WS_BASE")
     if not ws_base:
         scheme = "wss" if request.url.scheme == "https" else "ws"
