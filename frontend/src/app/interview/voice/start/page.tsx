@@ -31,6 +31,8 @@ export default function VoiceStartPage() {
   const [customRole, setCustomRole] = useState("");
   const [experienceLevel, setExperienceLevel] = useState<ExperienceLevel>("mid");
   const [jdFile, setJdFile] = useState<File | null>(null);
+  const [resumeFile, setResumeFile] = useState<File | null>(null);
+  const [numQuestions, setNumQuestions] = useState(5);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -42,18 +44,20 @@ export default function VoiceStartPage() {
       setError("Please specify a job role.");
       return;
     }
-    if (!jdFile) {
-      setError("Please upload a job description (PDF or DOCX).");
+    if (!resumeFile && !jdFile) {
+      setError("Upload a resume (recommended) and/or a job description.");
       return;
     }
     setLoading(true);
     setError(null);
 
     const form = new FormData();
-    form.append("file", jdFile);
+    if (resumeFile) form.append("resume", resumeFile);
+    if (jdFile) form.append("jd", jdFile);
     form.append("candidate_name", candidateName.trim() || "Candidate");
     form.append("job_role", effectiveRole);
     form.append("experience_level", experienceLevel);
+    form.append("num_questions", String(numQuestions));
 
     try {
       const res = await startVoiceSessionFromJd(form);
@@ -146,17 +150,50 @@ export default function VoiceStartPage() {
 
         <div>
           <label className="block text-sm font-medium text-slate-700 mb-1">
-            Job Description <span className="text-red-500">*</span>
+            Resume <span className="text-slate-400">(recommended)</span>
+          </label>
+          <input
+            type="file"
+            accept=".pdf,.docx"
+            onChange={(e) => setResumeFile(e.target.files?.[0] ?? null)}
+            className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500 file:mr-4 file:rounded-md file:border-0 file:bg-violet-50 file:px-3 file:py-1.5 file:text-violet-700"
+          />
+          <p className="text-xs text-slate-400 mt-1">
+            PDF or DOCX. Adds questions personalized to the candidate&apos;s experience.
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-slate-700 mb-1">
+            Job Description <span className="text-slate-400">(optional)</span>
           </label>
           <input
             type="file"
             accept=".pdf,.docx"
             onChange={(e) => setJdFile(e.target.files?.[0] ?? null)}
             className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500 file:mr-4 file:rounded-md file:border-0 file:bg-violet-50 file:px-3 file:py-1.5 file:text-violet-700"
-            required
           />
           <p className="text-xs text-slate-400 mt-1">
-            PDF or DOCX. The interview&apos;s questions are generated from this.
+            Optional. Adds role-specific technical questions and unlocks up to 10 questions.
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-slate-700 mb-1">
+            Number of technical questions: <span className="font-semibold">{numQuestions}</span>
+          </label>
+          <input
+            type="range"
+            min={5}
+            max={10}
+            step={1}
+            value={numQuestions}
+            onChange={(e) => setNumQuestions(Number(e.target.value))}
+            className="w-full accent-violet-600"
+          />
+          <p className="text-xs text-slate-400 mt-1">
+            5–10 technical questions. Behavioral, project, and resume questions are added on top.
+            Without a JD, junior interviews are capped at what the question bank can supply.
           </p>
         </div>
 
