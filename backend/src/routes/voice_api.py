@@ -194,7 +194,16 @@ async def start_voice_session_from_jd(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="Could not analyze the job description. Try again.",
             )
-        merged = list(dict.fromkeys([*resume_skills, *parsed_summary.skills]))[:8]
+        # Dedup case-insensitively (LLM-derived skills aren't case-normalized) so a
+        # "Python"/"python" pair doesn't burn two of the 8 skill slots. Resume comes
+        # first, so the candidate's own casing wins on collision.
+        merged: list[str] = []
+        seen: set[str] = set()
+        for skill in [*resume_skills, *parsed_summary.skills]:
+            if skill.lower() not in seen:
+                seen.add(skill.lower())
+                merged.append(skill)
+        merged = merged[:8]
         jd_summary = JDSummary(
             skills=merged,
             responsibilities=parsed_summary.responsibilities,

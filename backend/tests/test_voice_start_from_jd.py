@@ -94,6 +94,36 @@ async def test_num_questions_capped_when_no_jd(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_jd_present_merges_skills_and_passes_jd_ideas(monkeypatch):
+    from src.routes import voice_api
+
+    captured = {}
+    def _fake_build(**kwargs):
+        captured.update(kwargs)
+        return InterviewPlan(questions=[build_jd_question("q", "t", 0)])
+
+    monkeypatch.setattr(voice_api, "build_voice_plan", _fake_build)
+    monkeypatch.setattr(voice_api, "extract_jd_text", lambda fn, data: "TEXT")
+    monkeypatch.setattr(voice_api, "analyze_resume", lambda text, num_questions=2: (
+        ["Python", "aws"], [{"question_text": "r", "topic": "rt"}]))
+    monkeypatch.setattr(voice_api, "analyze_jd", lambda text: (
+        JDSummary(skills=["python", "Docker", "AWS"], responsibilities=["build"], seniority_signals=["mid"]),
+        [{"question_text": "Design X", "topic": "x"}],
+    ))
+
+    await voice_api.start_voice_session_from_jd(
+        request=_Req(), resume=_upload("resume.pdf"), jd=_upload("jd.pdf"),
+        candidate_name="Alex", job_role="Backend", experience_level=ExperienceLevel.MID,
+        num_questions=6,
+    )
+    merged = captured["jd_summary"].skills
+    # Case-insensitive dedup: Python/python and aws/AWS collapse, first casing kept.
+    assert merged == ["Python", "aws", "Docker"]
+    assert captured["jd_question_ideas"] == [{"question_text": "Design X", "topic": "x"}]
+    assert captured["technical_count"] == 6     # JD present -> no capacity cap
+
+
+@pytest.mark.asyncio
 async def test_num_questions_out_of_range_rejected():
     from src.routes.voice_api import start_voice_session_from_jd
     with pytest.raises(HTTPException) as exc:
