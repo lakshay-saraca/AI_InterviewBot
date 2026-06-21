@@ -79,8 +79,15 @@ class VoiceTurnState:
         increment_voice_field(self.session_id, "barge_in_count")
         logger.info("Barge-in detected session=%s", self.session_id)
 
-    async def stream_response(self, text: str, entry_type: str = "response") -> None:
-        """Stream LLM response through TTS sentence by sentence."""
+    async def stream_response(
+        self, text: str, entry_type: str = "response", signal_turn_end: bool = True
+    ) -> None:
+        """Stream LLM response through TTS sentence by sentence.
+
+        signal_turn_end=False is used for non-final opening turns (e.g. the intro
+        spoken just before the first question) so they don't prematurely open the
+        mic or start the silence monitor.
+        """
         sentences = split_into_sentences(text)
         if not sentences:
             return
@@ -134,6 +141,9 @@ class VoiceTurnState:
                     "event": "error",
                     "message": "Interview evaluation is taking longer than expected.",
                 })
+            return
+
+        if not signal_turn_end:
             return
 
         set_voice_field(self.session_id, "state", "WAITING_FOR_CANDIDATE")

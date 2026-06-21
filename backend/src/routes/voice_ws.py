@@ -279,18 +279,27 @@ async def voice_interview_ws(
             "transcript": transcript_raw,
         })
 
-    # Deliver first question via TTS on initial connect
+    # Deliver the opening turns via TTS on initial connect: every leading bot
+    # turn up to and including the first "question" turn. Only the final turn
+    # signals the candidate's turn / starts the silence monitor.
     if session.get("state") == "WAITING_FOR_CANDIDATE":
-        first_q_entries = [
-            t for t in transcript_raw
-            if t.get("speaker") == "bot" and t.get("type") == "question"
-        ]
-        if first_q_entries:
+        leading: list[dict] = []
+        for t in transcript_raw:
+            if t.get("speaker") != "bot":
+                break
+            leading.append(t)
+            if t.get("type") == "question":
+                break
+        if leading:
             from src.services.interview.voice_turn_processor import get_or_create_turn_state
             turn_state = get_or_create_turn_state(session_id, websocket)
-            await turn_state.stream_response(
-                first_q_entries[0]["text"], entry_type="question",
-            )
+            for i, entry in enumerate(leading):
+                is_last = i == len(leading) - 1
+                await turn_state.stream_response(
+                    entry["text"],
+                    entry_type=entry.get("type", "question"),
+                    signal_turn_end=is_last,
+                )
 
     try:
         while True:

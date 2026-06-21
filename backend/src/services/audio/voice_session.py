@@ -60,6 +60,8 @@ def create_voice_session(
     required_skills: list[str],
     questions_json: str = "[]",
     intro_text: str = "",
+    ease_in_text: str = "",
+    jd_summary_json: str = "{}",
 ) -> dict[str, Any]:
     """Create initial voice session hash in Redis."""
     now = datetime.now(timezone.utc).isoformat()
@@ -71,10 +73,22 @@ def create_voice_session(
     if questions:
         first_q_text = questions[0].get("question_text", "")
         if first_q_text:
-            entry_text = f"{intro_text} {first_q_text}".strip() if intro_text else first_q_text
+            # Intro is its OWN questionless turn; the question turn carries the
+            # ease-in lead-in then the first question. Splitting them fixes the
+            # "bot asks a question in the introduction" bug.
+            if intro_text:
+                transcript.append({
+                    "speaker": "bot",
+                    "text": intro_text,
+                    "timestamp": now,
+                    "type": "intro",
+                })
+            question_text = (
+                f"{ease_in_text} {first_q_text}".strip() if ease_in_text else first_q_text
+            )
             transcript.append({
                 "speaker": "bot",
-                "text": entry_text,
+                "text": question_text,
                 "timestamp": now,
                 "type": "question",
             })
@@ -87,6 +101,7 @@ def create_voice_session(
         "experience_level": experience_level,
         "required_skills": json.dumps(required_skills),
         "questions": questions_json,
+        "jd_summary": jd_summary_json,
         "current_question_idx": 0,
         "follow_up_count": 0,
         "running_scores": json.dumps({}),
