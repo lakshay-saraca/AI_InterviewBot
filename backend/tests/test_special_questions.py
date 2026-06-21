@@ -47,3 +47,21 @@ def test_build_jd_question_has_rubric_and_tag():
     assert q.topic == "rate limiting"
     assert q.tags == ["jd_generated"]
     assert q.rubric
+
+
+def test_build_resume_question_shape():
+    from src.services.interview.special_questions import build_resume_question
+    q = build_resume_question("Walk me through the payments service you built.", "payments", index=0)
+    assert q.id == "resume_0"
+    assert q.question_text == "Walk me through the payments service you built."
+    assert q.topic == "payments"
+    assert q.difficulty == "medium"          # resume Qs are medium (decision Q4)
+    assert q.tags == ["resume_generated"]
+    assert q.rubric                          # non-empty rubric so evaluator works
+
+
+def test_build_resume_question_defaults_topic():
+    from src.services.interview.special_questions import build_resume_question
+    q = build_resume_question("Tell me about a project.", "", index=1)
+    assert q.id == "resume_1"
+    assert q.topic == "candidate background"
