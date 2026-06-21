@@ -10,6 +10,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from jose import jwt
@@ -22,10 +23,12 @@ from src.services.audio.voice_session import (
     create_voice_session,
     get_voice_session,
 )
-from src.services.interview.plan_builder import build_plan, InsufficientQuestionsError
-from src.services.interview.warmup import generate_introduction
+from src.services.interview.plan_builder import build_voice_plan, InsufficientQuestionsError
+from src.services.interview.warmup import generate_introduction, build_ease_in
 from src.services.llm.jd_analysis import analyze_jd, JDAnalysisError
-from src.services.questions.question_bank import get_question_set
+from src.services.llm.resume_analysis import analyze_resume, ResumeAnalysisError
+from src.services.questions.question_bank import get_question_set, eligible_question_count
+from src.types.config import JDSummary
 from src.types.interview import ExperienceLevel
 
 logger = logging.getLogger(__name__)
@@ -124,8 +127,9 @@ async def start_voice_session(body: VoiceSessionStartRequest, request: Request) 
     )
 
 
-VOICE_TOTAL_QUESTIONS = 6
-VOICE_CORE_RATIO = 0.5  # -> 2 JD questions + 2 core bank + behavioral + project
+VOICE_CORE_RATIO = 0.7   # ~70% bank / 30% JD when a JD is attached
+MIN_QUESTIONS = 5
+MAX_QUESTIONS = 10
 
 
 @router.post(
@@ -136,49 +140,98 @@ VOICE_CORE_RATIO = 0.5  # -> 2 JD questions + 2 core bank + behavioral + project
 )
 async def start_voice_session_from_jd(
     request: Request,
-    file: UploadFile = File(...),
+    resume: Optional[UploadFile] = File(None),
+    jd: Optional[UploadFile] = File(None),
     candidate_name: str = Form("Candidate"),
     job_role: str = Form(...),
     experience_level: ExperienceLevel = Form(ExperienceLevel.MID),
+    num_questions: int = Form(MIN_QUESTIONS),
 ) -> VoiceSessionStartResponse:
-    data = await file.read()
-    try:
-        jd_text = extract_jd_text(file.filename or "", data)
-    except JDExtractError:
+    if not (MIN_QUESTIONS <= num_questions <= MAX_QUESTIONS):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Could not read the job description file.",
+            detail=f"num_questions must be between {MIN_QUESTIONS} and {MAX_QUESTIONS}.",
         )
 
-    try:
-        jd_summary, jd_ideas = analyze_jd(jd_text)
-    except JDAnalysisError as exc:
-        logger.error("Voice JD analysis failed: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Could not analyze the job description. Try again.",
+    # --- Resume (optional, primary): extract + analyze -> skills + personalized Qs ---
+    resume_skills: list[str] = []
+    resume_questions: list[dict] = []
+    if resume is not None:
+        resume_bytes = await resume.read()
+        try:
+            resume_text = extract_jd_text(resume.filename or "", resume_bytes)
+        except JDExtractError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Could not read the resume file.",
+            )
+        try:
+            resume_skills, resume_questions = analyze_resume(resume_text, num_questions=2)
+        except ResumeAnalysisError as exc:
+            logger.error("Voice resume analysis failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Could not analyze the resume. Try again.",
+            )
+
+    # --- JD (optional filler): extract + analyze -> jd_summary + role-specific Qs ---
+    jd_summary = JDSummary(skills=resume_skills)
+    jd_ideas: list[dict] = []
+    if jd is not None:
+        jd_bytes = await jd.read()
+        try:
+            jd_text = extract_jd_text(jd.filename or "", jd_bytes)
+        except JDExtractError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Could not read the job description file.",
+            )
+        try:
+            parsed_summary, jd_ideas = analyze_jd(jd_text)
+        except JDAnalysisError as exc:
+            logger.error("Voice JD analysis failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Could not analyze the job description. Try again.",
+            )
+        merged = list(dict.fromkeys([*resume_skills, *parsed_summary.skills]))[:8]
+        jd_summary = JDSummary(
+            skills=merged,
+            responsibilities=parsed_summary.responsibilities,
+            seniority_signals=parsed_summary.seniority_signals,
         )
 
+    # --- No-JD cap: the bank can't exceed its per-level eligibility ---
+    technical_count = num_questions
+    if not jd_ideas:
+        capacity = eligible_question_count(experience_level)
+        if technical_count > capacity:
+            logger.warning(
+                "Capping num_questions %d -> %d (no JD, level=%s bank capacity)",
+                technical_count, capacity, experience_level.value,
+            )
+            technical_count = capacity
+
     try:
-        plan = build_plan(
+        plan = build_voice_plan(
             role=job_role,
             experience_level=experience_level,
             jd_summary=jd_summary,
             jd_question_ideas=jd_ideas,
-            total_questions=VOICE_TOTAL_QUESTIONS,
+            resume_questions=resume_questions,
+            technical_count=technical_count,
             core_ratio=VOICE_CORE_RATIO,
         )
     except InsufficientQuestionsError as exc:
-        # Log the internal counts but return a sanitized message — the raw text
-        # ("Bank supplied 1 core questions, need 3") leaks bank config to the client.
-        logger.warning("Voice JD plan could not be built: %s", exc)
+        logger.warning("Voice plan could not be built: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Not enough questions available to build the interview from this role and JD.",
+            detail="Not enough questions available to build the interview for this role and level.",
         )
 
     session_id = str(uuid.uuid4())
     intro_text = generate_introduction(candidate_name, job_role, len(plan.questions))
+    ease_in_text = build_ease_in(candidate_name)
     create_voice_session(
         session_id=session_id,
         candidate_name=candidate_name,
@@ -187,10 +240,13 @@ async def start_voice_session_from_jd(
         required_skills=jd_summary.skills,
         questions_json=_json.dumps([q.model_dump() for q in plan.questions]),
         intro_text=intro_text,
+        ease_in_text=ease_in_text,
+        jd_summary_json=_json.dumps(jd_summary.model_dump()),
     )
     logger.info(
-        "Voice JD session created session=%s role=%s questions=%d",
-        session_id, job_role, len(plan.questions),
+        "Voice session created session=%s role=%s technical=%d total=%d jd=%s resume=%s",
+        session_id, job_role, technical_count, len(plan.questions),
+        jd is not None, resume is not None,
     )
 
     token = _issue_token(session_id)

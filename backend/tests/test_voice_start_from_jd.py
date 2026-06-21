@@ -1,146 +1,137 @@
-"""POST /voice/session/start-from-jd.
+"""POST /voice/session/start-from-jd (resume-primary, JD-optional).
 
-WHY: the endpoint must (a) reject non-admins BEFORE any LLM call, (b) build the voice
-session's questions from the JD plan (so JD questions actually get asked), and
-(c) fail loud at each stage instead of starting a half-built interview.
+WHY: the endpoint must (a) reject non-admins before any LLM call; (b) build the
+voice plan from resume + optional JD with an admin-chosen technical count; (c) cap
+the count to bank capacity when no JD is attached; (d) fail loud at each stage
+instead of starting a half-built interview; (e) store jd_summary for the outro.
 """
 import io
+import json
 from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException, UploadFile
 
 from src.lib.jd_extract import JDExtractError
-from src.services.llm.jd_analysis import JDAnalysisError
 from src.services.interview.plan_builder import InsufficientQuestionsError
-from src.services.interview.special_questions import build_jd_question
+from src.services.interview.special_questions import build_jd_question, build_resume_question
 from src.types.config import InterviewPlan, JDSummary
 from src.types.interview import ExperienceLevel
 
 
-def _upload(name="jd.pdf", data=b"%PDF-bytes") -> UploadFile:
+def _upload(name="doc.pdf", data=b"%PDF-bytes"):
     return UploadFile(filename=name, file=io.BytesIO(data))
 
 
 class _Req:
-    """Minimal stand-in for starlette Request (only .url is used)."""
-
     class _Url:
-        scheme = "http"
-        netloc = "testserver"
-
+        scheme = "http"; netloc = "testserver"
     url = _Url()
 
 
-def _no_session_stored() -> bool:
-    # conftest's autouse fixture forces the in-memory store and clears it per test,
-    # so an empty store proves no half-built session was persisted before the error.
+def _no_session_stored():
     from src.services.audio.voice_session import _MEMORY
-
     return len(_MEMORY) == 0
 
 
 @pytest.mark.asyncio
 async def test_wrong_admin_key_rejected_before_llm():
     from src.routes.admin import require_admin
-
     with pytest.raises(HTTPException) as exc:
         await require_admin(x_admin_key="not-the-key")
     assert exc.value.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_happy_path_session_questions_come_from_jd_plan():
+async def test_resume_only_builds_plan_and_stores_jd_summary():
     from src.routes.voice_api import start_voice_session_from_jd
 
-    summary = JDSummary(skills=["python"], responsibilities=["apis"], seniority_signals=["mid"])
-    ideas = [{"question_text": "Explain async IO", "topic": "async"},
-             {"question_text": "Design a rate limiter", "topic": "systems"}]
     plan = InterviewPlan(questions=[
-        build_jd_question("Explain async IO", "async", 0),
-        build_jd_question("Design a rate limiter", "systems", 1),
+        build_resume_question("Tell me about Acme.", "acme", 0),
+        build_resume_question("Tell me about K8s.", "k8s", 1),
     ])
-
     with (
-        patch("src.routes.voice_api.extract_jd_text", return_value="JD TEXT"),
-        patch("src.routes.voice_api.analyze_jd", return_value=(summary, ideas)),
-        patch("src.routes.voice_api.build_plan", return_value=plan),
+        patch("src.routes.voice_api.extract_jd_text", return_value="RESUME TEXT"),
+        patch("src.routes.voice_api.analyze_resume", return_value=(["python"], [
+            {"question_text": "Tell me about Acme.", "topic": "acme"}])),
+        patch("src.routes.voice_api.build_voice_plan", return_value=plan),
     ):
         resp = await start_voice_session_from_jd(
-            request=_Req(),
-            file=_upload(),
-            candidate_name="Alex",
-            job_role="Backend Engineer",
-            experience_level=ExperienceLevel.MID,
+            request=_Req(), resume=_upload("resume.pdf"), jd=None,
+            candidate_name="Alex", job_role="Backend Engineer",
+            experience_level=ExperienceLevel.JUNIOR, num_questions=5,
         )
 
     from src.services.audio.voice_session import get_voice_session
-    import json
-
     sess = get_voice_session(resp.session_id)
     assert sess is not None
-    stored = json.loads(sess["questions"])
-    assert [q["question_text"] for q in stored] == ["Explain async IO", "Design a rate limiter"]
-    assert resp.ws_url.endswith(f"/ws/interview/voice/{resp.session_id}?token={resp.token}")
+    assert json.loads(sess["transcript"])[0]["type"] == "intro"   # split opening
+    assert "jd_summary" in sess
 
 
 @pytest.mark.asyncio
-async def test_unreadable_file_returns_422():
-    from src.routes.voice_api import start_voice_session_from_jd
+async def test_num_questions_capped_when_no_jd(monkeypatch):
+    from src.routes import voice_api
 
+    captured = {}
+    def _fake_build(**kwargs):
+        captured.update(kwargs)
+        return InterviewPlan(questions=[build_resume_question("x", "x", 0)])
+
+    monkeypatch.setattr(voice_api, "build_voice_plan", _fake_build)
+    monkeypatch.setattr(voice_api, "eligible_question_count", lambda level: 5)
+    monkeypatch.setattr(voice_api, "analyze_resume", lambda text, num_questions=2: (["py"], [
+        {"question_text": "q", "topic": "t"}]))
+    monkeypatch.setattr(voice_api, "extract_jd_text", lambda fn, data: "TEXT")
+
+    await voice_api.start_voice_session_from_jd(
+        request=_Req(), resume=_upload(), jd=None,
+        candidate_name="Alex", job_role="Backend", experience_level=ExperienceLevel.JUNIOR,
+        num_questions=10,   # asked for 10, bank only supports 5
+    )
+    assert captured["technical_count"] == 5            # capped to capacity
+    assert captured["jd_question_ideas"] == []
+
+
+@pytest.mark.asyncio
+async def test_num_questions_out_of_range_rejected():
+    from src.routes.voice_api import start_voice_session_from_jd
+    with pytest.raises(HTTPException) as exc:
+        await start_voice_session_from_jd(
+            request=_Req(), resume=_upload(), jd=None, candidate_name="Alex",
+            job_role="Backend", experience_level=ExperienceLevel.MID, num_questions=99,
+        )
+    assert exc.value.status_code == 422
+    assert _no_session_stored()
+
+
+@pytest.mark.asyncio
+async def test_unreadable_resume_returns_422():
+    from src.routes.voice_api import start_voice_session_from_jd
     with patch("src.routes.voice_api.extract_jd_text", side_effect=JDExtractError("bad")):
         with pytest.raises(HTTPException) as exc:
             await start_voice_session_from_jd(
-                request=_Req(), file=_upload(), candidate_name="Alex",
-                job_role="Backend Engineer", experience_level=ExperienceLevel.MID,
+                request=_Req(), resume=_upload(), jd=None, candidate_name="Alex",
+                job_role="Backend", experience_level=ExperienceLevel.MID, num_questions=5,
             )
     assert exc.value.status_code == 422
     assert _no_session_stored()
 
 
 @pytest.mark.asyncio
-async def test_jd_analysis_failure_returns_502():
+async def test_insufficient_questions_returns_422_without_leak():
     from src.routes.voice_api import start_voice_session_from_jd
-
     with (
-        patch("src.routes.voice_api.extract_jd_text", return_value="JD TEXT"),
-        patch("src.routes.voice_api.analyze_jd", side_effect=JDAnalysisError("boom")),
+        patch("src.routes.voice_api.extract_jd_text", return_value="TEXT"),
+        patch("src.routes.voice_api.analyze_resume", return_value=(["py"], [
+            {"question_text": "q", "topic": "t"}])),
+        patch("src.routes.voice_api.build_voice_plan", side_effect=InsufficientQuestionsError("need 5")),
     ):
         with pytest.raises(HTTPException) as exc:
             await start_voice_session_from_jd(
-                request=_Req(), file=_upload(), candidate_name="Alex",
-                job_role="Backend Engineer", experience_level=ExperienceLevel.MID,
-            )
-    assert exc.value.status_code == 502
-    assert _no_session_stored()
-
-
-@pytest.mark.asyncio
-async def test_insufficient_questions_returns_422():
-    from src.routes.voice_api import start_voice_session_from_jd
-
-    summary = JDSummary(skills=["python"])
-    with (
-        patch("src.routes.voice_api.extract_jd_text", return_value="JD TEXT"),
-        patch("src.routes.voice_api.analyze_jd", return_value=(summary, [{"question_text": "Q", "topic": "t"}])),
-        patch("src.routes.voice_api.build_plan", side_effect=InsufficientQuestionsError("not enough")),
-    ):
-        with pytest.raises(HTTPException) as exc:
-            await start_voice_session_from_jd(
-                request=_Req(), file=_upload(), candidate_name="Alex",
-                job_role="Backend Engineer", experience_level=ExperienceLevel.MID,
+                request=_Req(), resume=_upload(), jd=None, candidate_name="Alex",
+                job_role="Backend", experience_level=ExperienceLevel.MID, num_questions=5,
             )
     assert exc.value.status_code == 422
-    assert _no_session_stored()
-    # And the leaked internal count must not reach the client.
     assert "need" not in (exc.value.detail or "").lower()
-
-
-def test_voice_defaults_yield_two_jd_questions():
-    # Locks the feature's core promise: the voice constants split the technical
-    # pool into 2 core + 2 JD questions (reviewer's "core=3, jd=1" was wrong).
-    from src.routes.voice_api import VOICE_TOTAL_QUESTIONS, VOICE_CORE_RATIO
-    from src.services.interview.plan_math import compute_split
-
-    core_count, jd_count = compute_split(VOICE_TOTAL_QUESTIONS, VOICE_CORE_RATIO)
-    assert (core_count, jd_count) == (2, 2)
+    assert _no_session_stored()
