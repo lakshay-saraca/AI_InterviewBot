@@ -17,11 +17,16 @@ const ROLES = [
   "Other",
 ];
 
-const LEVELS: { value: ExperienceLevel; label: string; description: string }[] = [
+const LEVELS: {
+  value: ExperienceLevel;
+  label: string;
+  description: string;
+  comingSoon?: boolean;
+}[] = [
   { value: "junior", label: "Junior", description: "0–2 years" },
   { value: "mid", label: "Mid-Level", description: "2–5 years" },
-  { value: "senior", label: "Senior", description: "5–8 years" },
-  { value: "staff", label: "Staff", description: "8+ years" },
+  { value: "senior", label: "Senior", description: "5–8 years", comingSoon: true },
+  { value: "staff", label: "Staff", description: "8+ years", comingSoon: true },
 ];
 
 export default function VoiceStartPage() {
@@ -30,9 +35,9 @@ export default function VoiceStartPage() {
   const [jobRole, setJobRole] = useState(ROLES[2]);
   const [customRole, setCustomRole] = useState("");
   const [experienceLevel, setExperienceLevel] = useState<ExperienceLevel>("mid");
-  const [jdFile, setJdFile] = useState<File | null>(null);
   const [resumeFile, setResumeFile] = useState<File | null>(null);
-  const [numQuestions, setNumQuestions] = useState(5);
+  // Number of questions is fixed while the selector is in production.
+  const numQuestions = 5;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,16 +49,15 @@ export default function VoiceStartPage() {
       setError("Please specify a job role.");
       return;
     }
-    if (!resumeFile && !jdFile) {
-      setError("Upload a resume (recommended) and/or a job description.");
+    if (!resumeFile) {
+      setError("Upload a resume to continue.");
       return;
     }
     setLoading(true);
     setError(null);
 
     const form = new FormData();
-    if (resumeFile) form.append("resume", resumeFile);
-    if (jdFile) form.append("jd", jdFile);
+    form.append("resume", resumeFile);
     form.append("candidate_name", candidateName.trim() || "Candidate");
     form.append("job_role", effectiveRole);
     form.append("experience_level", experienceLevel);
@@ -134,14 +138,24 @@ export default function VoiceStartPage() {
               <button
                 key={level.value}
                 type="button"
+                disabled={level.comingSoon}
                 onClick={() => setExperienceLevel(level.value)}
                 className={`p-3 rounded-lg border-2 text-left transition-colors ${
-                  experienceLevel === level.value
+                  level.comingSoon
+                    ? "border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed"
+                    : experienceLevel === level.value
                     ? "border-violet-500 bg-violet-50 text-violet-700"
                     : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
                 }`}
               >
-                <div className="font-medium">{level.label}</div>
+                <div className="font-medium flex items-center gap-1.5">
+                  {level.label}
+                  {level.comingSoon && (
+                    <span className="text-[10px] font-medium uppercase tracking-wide bg-slate-200 text-slate-500 rounded px-1.5 py-0.5">
+                      🚧 In production
+                    </span>
+                  )}
+                </div>
                 <div className="text-xs opacity-70">{level.description}</div>
               </button>
             ))}
@@ -150,7 +164,7 @@ export default function VoiceStartPage() {
 
         <div>
           <label className="block text-sm font-medium text-slate-700 mb-1">
-            Resume <span className="text-slate-400">(recommended)</span>
+            Resume <span className="text-rose-500">*</span>
           </label>
           <input
             type="file"
@@ -164,23 +178,11 @@ export default function VoiceStartPage() {
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1">
-            Job Description <span className="text-slate-400">(optional)</span>
-          </label>
-          <input
-            type="file"
-            accept=".pdf,.docx"
-            onChange={(e) => setJdFile(e.target.files?.[0] ?? null)}
-            className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500 file:mr-4 file:rounded-md file:border-0 file:bg-violet-50 file:px-3 file:py-1.5 file:text-violet-700"
-          />
-          <p className="text-xs text-slate-400 mt-1">
-            Optional. Adds role-specific technical questions and unlocks up to 10 questions.
-          </p>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1">
-            Number of technical questions: <span className="font-semibold">{numQuestions}</span>
+          <label className="flex items-center gap-2 text-sm font-medium text-slate-400 mb-1">
+            Number of technical questions
+            <span className="text-[10px] font-medium uppercase tracking-wide bg-slate-200 text-slate-500 rounded px-1.5 py-0.5">
+              🚧 In production
+            </span>
           </label>
           <input
             type="range"
@@ -188,12 +190,12 @@ export default function VoiceStartPage() {
             max={10}
             step={1}
             value={numQuestions}
-            onChange={(e) => setNumQuestions(Number(e.target.value))}
-            className="w-full accent-violet-600"
+            disabled
+            className="w-full accent-slate-400 cursor-not-allowed opacity-60"
           />
           <p className="text-xs text-slate-400 mt-1">
-            5–10 technical questions. Behavioral, project, and resume questions are added on top.
-            Without a JD, junior interviews are capped at what the question bank can supply.
+            Coming soon. Interviews currently run with a fixed set of {numQuestions} technical
+            questions, plus behavioral and resume questions on top.
           </p>
         </div>
 
