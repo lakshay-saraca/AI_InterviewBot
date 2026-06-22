@@ -38,9 +38,19 @@ def estimate_session_minutes(total_questions: int) -> int:
 def generate_introduction(candidate_name: str, job_role: str, total_questions: int) -> str:
     duration = estimate_session_minutes(total_questions)
     return (
-        f"Hi {candidate_name}! I'm your AI interviewer today. "
-        f"We have a {job_role} session lined up — {total_questions} technical questions "
-        f"after a quick warm-up. The whole thing should take about {duration} minutes."
+        f"Hi {candidate_name}, I'm your AI interviewer today. "
+        f"We've got a {job_role} session lined up — {total_questions} questions, "
+        f"and it should take about {duration} minutes. "
+        f"Take your time, and feel free to think out loud as you go."
+    )
+
+
+def build_ease_in(candidate_name: str) -> str:
+    """Fixed lead-in spoken right before the first (easy) question. No question mark —
+    the easy question text is appended after this by the session seeder."""
+    return (
+        f"Whenever you're ready {candidate_name}, let's start with something "
+        f"straightforward."
     )
 
 

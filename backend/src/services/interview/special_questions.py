@@ -62,3 +62,16 @@ def build_jd_question(question_text: str, topic: str, index: int) -> Question:
         rubric=_GENERIC_RUBRIC,
         tags=["jd_generated"],
     )
+
+
+def build_resume_question(question_text: str, topic: str, index: int) -> Question:
+    return Question(
+        id=f"resume_{index}",
+        topic=topic or "candidate background",
+        difficulty="medium",
+        question_type=QuestionType.SCENARIO,
+        experience_level="all",
+        question_text=question_text,
+        rubric=_GENERIC_RUBRIC,
+        tags=["resume_generated"],
+    )
