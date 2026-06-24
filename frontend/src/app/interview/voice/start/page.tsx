@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import AdminGuard from "@/components/AdminGuard";
 import { startVoiceSessionFromJd } from "@/services/voice-api";
 import { ApiClientError } from "@/services/api";
 import type { ExperienceLevel } from "@/types/interview";
@@ -82,7 +81,6 @@ export default function VoiceStartPage() {
   };
 
   return (
-    <AdminGuard>
     <div className="max-w-xl mx-auto">
       <div className="flex items-center gap-3 mb-6">
         <span className="text-3xl">🎙</span>
@@ -214,6 +212,5 @@ export default function VoiceStartPage() {
         </button>
       </form>
     </div>
-    </AdminGuard>
   );
 }
