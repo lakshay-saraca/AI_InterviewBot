@@ -7,10 +7,11 @@ Per-session state:
 
 Barge-in: speech during bot_speaking → cancel TTS, send stop signal.
 
-Silence timeouts (managed via _silence_monitor):
-  15s  → gentle prompt
-  30s  → "Are you still there?"
-  45s  → silence_strike++, advance question
+Silence timeouts (managed via _silence_monitor, all spoken via TTS):
+  8s   → gentle nudge ("Take your time…")
+  18s  → check-in ("Are you still there? … running into any issues?")
+  30s  → silence_strike++, then deterministically advance to the next question
+         (or enter wrap-up if none remain) — no LLM call
 """
 
 import asyncio
@@ -68,7 +69,6 @@ class VoiceTurnState:
         self.current_tts_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
         self.tts = ElevenLabsTTS()
         self._silence_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
-        self._silence_prompt_count = 0
 
     async def handle_barge_in(self) -> None:
         """Cancel current TTS and open mic."""
@@ -194,7 +194,6 @@ class VoiceTurnState:
         if self._silence_task and not self._silence_task.done():
             self._silence_task.cancel()
         self._silence_task = None
-        self._silence_prompt_count = 0
 
     async def _advance_after_silence(self) -> None:
         """Deterministically advance to the next question after the candidate
