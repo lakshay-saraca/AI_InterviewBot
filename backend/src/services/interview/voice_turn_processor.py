@@ -7,13 +7,15 @@ Per-session state:
 
 Barge-in: speech during bot_speaking → cancel TTS, send stop signal.
 
-Silence timeouts (managed via _silence_monitor):
-  15s  → gentle prompt
-  30s  → "Are you still there?"
-  45s  → silence_strike++, advance question
+Silence timeouts (managed via _silence_monitor, all spoken via TTS):
+  8s   → gentle nudge ("Take your time…")
+  18s  → check-in ("Are you still there? … running into any issues?")
+  30s  → silence_strike++, then deterministically advance to the next question
+         (or enter wrap-up if none remain) — no LLM call
 """
 
 import asyncio
+import json
 import logging
 from typing import Any, Optional
 
@@ -26,14 +28,20 @@ from src.services.audio.voice_session import (
     set_voice_field,
     append_transcript_turn,
 )
+from src.types.interview import Question
 
 logger = logging.getLogger(__name__)
 
-SILENCE_PROMPT_SECS = 15
-SILENCE_CHECKIN_SECS = 30
-SILENCE_STRIKE_SECS = 45
+SILENCE_PROMPT_SECS = 8     # first gentle nudge
+SILENCE_CHECKIN_SECS = 18   # "are you still there / facing an issue" check-in
+SILENCE_STRIKE_SECS = 30    # strike + advance to next question
 COMPLETION_WAIT_TIMEOUT_SECS = 90.0
 COMPLETION_POLL_INTERVAL_SECS = 0.25
+
+# Spoken silence check-ins (deterministic — never LLM-generated).
+SILENCE_PROMPT_1 = "Take your time — I'm here whenever you're ready."
+SILENCE_PROMPT_2 = "Are you still there? Is everything okay, or are you running into any issues?"
+SILENCE_ADVANCE = "No problem — let's move on to the next question."
 
 
 async def _wait_for_report_ready(session_id: str) -> bool:
@@ -61,7 +69,17 @@ class VoiceTurnState:
         self.current_tts_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
         self.tts = ElevenLabsTTS()
         self._silence_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
-        self._silence_prompt_count = 0
+        self._silence_advance_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
+
+    def _track_task(self, attr_name: str, task: asyncio.Task) -> asyncio.Task:
+        setattr(self, attr_name, task)
+
+        def _clear(done_task: asyncio.Task) -> None:
+            if getattr(self, attr_name) is done_task:
+                setattr(self, attr_name, None)
+
+        task.add_done_callback(_clear)
+        return task
 
     async def handle_barge_in(self) -> None:
         """Cancel current TTS and open mic."""
@@ -150,49 +168,114 @@ class VoiceTurnState:
         await _send_json(self.ws, {"event": "turn", "speaker": "candidate"})
         self._start_silence_monitor()
 
+    async def _speak_silence_prompt(self, text: str) -> None:
+        """Voice a silence check-in through TTS.
+
+        Streams via the same TTS path as a normal turn so the candidate actually
+        HEARS the prompt. Deliberately does NOT restart the silence monitor —
+        the single monitor coroutine keeps walking its ladder, and reusing
+        stream_response (which restarts the monitor) would cancel the very
+        coroutine that called this.
+        """
+        sentences = split_into_sentences(text)
+        if not sentences:
+            return
+
+        self.bot_speaking = True
+        set_voice_field(self.session_id, "state", "BOT_SPEAKING")
+        await _send_json(self.ws, {
+            "event": "interviewer_prompt",
+            "text": text,
+            "type": "silence_prompt",
+        })
+        append_transcript_turn(self.session_id, "bot", text, entry_type="silence_prompt")
+        try:
+            for sentence in sentences:
+                await self.tts.stream_sentence(sentence, self.ws)
+        finally:
+            self.bot_speaking = False
+            set_voice_field(self.session_id, "state", "WAITING_FOR_CANDIDATE")
+
     def _start_silence_monitor(self) -> None:
         if self._silence_task and not self._silence_task.done():
             self._silence_task.cancel()
-        self._silence_task = asyncio.create_task(self._silence_monitor())
+        self._track_task("_silence_task", asyncio.create_task(self._silence_monitor()))
 
     def cancel_silence_monitor(self) -> None:
         if self._silence_task and not self._silence_task.done():
             self._silence_task.cancel()
+        if self._silence_advance_task and not self._silence_advance_task.done():
+            self._silence_advance_task.cancel()
         self._silence_task = None
-        self._silence_prompt_count = 0
+        self._silence_advance_task = None
+
+    async def _advance_after_silence(self) -> None:
+        """Deterministically advance to the next question after the candidate
+        stays silent through the full nudge ladder. No LLM call — mirrors the
+        advance branch of run_llm_turn using code only.
+        """
+        try:
+            voice_data = get_voice_session(self.session_id)
+            if voice_data is None:
+                return
+
+            questions = [Question(**q) for q in json.loads(voice_data.get("questions", "[]"))]
+            current_idx = int(voice_data.get("current_question_idx", 0))
+            next_idx = current_idx + 1
+            set_voice_field(self.session_id, "current_question_idx", next_idx)
+            set_voice_field(self.session_id, "follow_up_count", 0)
+
+            # Lazy import: voice_llm_orchestrator imports this module's siblings;
+            # importing it at module load risks a circular import (same pattern as
+            # the lazy run_llm_turn import in process_voice_turn).
+            from src.services.interview.voice_llm_orchestrator import _enter_wrap_up
+
+            if next_idx >= len(questions):
+                invite = _enter_wrap_up(self.session_id, voice_data, lead_in=SILENCE_ADVANCE)
+                await self.stream_response(invite, entry_type="wrap_up_invite")
+                return
+
+            next_q = questions[next_idx]
+            append_transcript_turn(
+                self.session_id, "bot", next_q.question_text, entry_type="question"
+            )
+            spoken = f"{SILENCE_ADVANCE} {next_q.question_text}".strip()
+            await self.stream_response(spoken)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Silence advance failed session=%s: %s", self.session_id, exc)
+            await _send_json(self.ws, {
+                "event": "error",
+                "message": "I had trouble moving to the next question.",
+            })
+            set_voice_field(self.session_id, "state", "WAITING_FOR_CANDIDATE")
 
     async def _silence_monitor(self) -> None:
         try:
             await asyncio.sleep(SILENCE_PROMPT_SECS)
-            if self._silence_prompt_count < 2:
-                await _send_json(self.ws, {
-                    "event": "interviewer_prompt",
-                    "text": "Take your time, I'm listening.",
-                    "type": "silence_prompt",
-                })
-                append_transcript_turn(self.session_id, "bot", "Take your time, I'm listening.", entry_type="silence_prompt")
-                self._silence_prompt_count += 1
+            await self._speak_silence_prompt(SILENCE_PROMPT_1)
 
             await asyncio.sleep(SILENCE_CHECKIN_SECS - SILENCE_PROMPT_SECS)
-            if self._silence_prompt_count < 2:
-                await _send_json(self.ws, {
-                    "event": "interviewer_prompt",
-                    "text": "Are you still there?",
-                    "type": "silence_prompt",
-                })
-                append_transcript_turn(self.session_id, "bot", "Are you still there?", entry_type="silence_prompt")
-                self._silence_prompt_count += 1
+            await self._speak_silence_prompt(SILENCE_PROMPT_2)
 
             await asyncio.sleep(SILENCE_STRIKE_SECS - SILENCE_CHECKIN_SECS)
             strikes = increment_voice_field(self.session_id, "silence_strikes")
             logger.info("Silence strike %d session=%s", strikes, self.session_id)
-
             await _send_json(self.ws, {
                 "event": "silence_strike",
                 "count": strikes,
                 "action": "advance_question",
             })
-
+            # Run the advance in its own task so this coroutine returns cleanly:
+            # the advance's stream_response starts a fresh silence monitor, which
+            # would otherwise cancel this still-running coroutine mid-await and
+            # cut off the next question's audio. Keep the handle so speech_start
+            # and disconnect cleanup can still cancel the pending advance.
+            self._track_task(
+                "_silence_advance_task",
+                asyncio.create_task(self._advance_after_silence()),
+            )
         except asyncio.CancelledError:
             pass
 
