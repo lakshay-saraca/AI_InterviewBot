@@ -1,4 +1,6 @@
 import type {
+  PlanPreviewResponse,
+  StartFromDraftRequest,
   VoiceSessionStartRequest,
   VoiceSessionStartResponse,
 } from "@/types/voice-interview";
@@ -36,13 +38,11 @@ export async function startVoiceSession(
 
 const ADMIN_KEY = process.env.NEXT_PUBLIC_ADMIN_API_KEY ?? "change-me-admin-key";
 
-export async function startVoiceSessionFromJd(
+export async function previewPlan(
   form: FormData
-): Promise<VoiceSessionStartResponse> {
-  const res = await fetch(`${API_BASE}/api/v1/voice/session/start-from-jd`, {
+): Promise<PlanPreviewResponse> {
+  const res = await fetch(`${API_BASE}/api/v1/voice/plan/preview`, {
     method: "POST",
-    // X-Admin-Key only — do NOT set Content-Type; the browser adds the
-    // multipart boundary automatically when the body is FormData.
     headers: { "X-Admin-Key": ADMIN_KEY },
     body: form,
   });
@@ -56,7 +56,23 @@ export async function startVoiceSessionFromJd(
     }
     throw new ApiClientError(`HTTP ${res.status}`, res.status, detail);
   }
-  return res.json() as Promise<VoiceSessionStartResponse>;
+  return res.json() as Promise<PlanPreviewResponse>;
+}
+
+export async function startFromDraft(
+  body: StartFromDraftRequest
+): Promise<VoiceSessionStartResponse> {
+  return request<VoiceSessionStartResponse>(
+    "/api/v1/voice/session/start-from-draft",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Admin-Key": ADMIN_KEY,
+      },
+      body: JSON.stringify(body),
+    }
+  );
 }
 
 export async function getVoiceSessionState(sessionId: string) {
