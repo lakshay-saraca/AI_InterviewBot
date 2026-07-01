@@ -16,6 +16,7 @@ import httpx
 from fastapi import WebSocket
 
 from src.lib.settings import get_settings
+from src.services.audio.voice_session import log_voice_event, record_voice_timing
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +34,10 @@ async def _send_json(ws: WebSocket, data: dict[str, Any]) -> None:
 
 
 class ElevenLabsTTS:
-    def __init__(self) -> None:
+    def __init__(self, session_id: str | None = None) -> None:
         self.settings = get_settings()
         self._chars_used = 0
+        self.session_id = session_id
 
     @property
     def chars_used(self) -> int:
@@ -51,6 +53,12 @@ class ElevenLabsTTS:
             return
 
         if self._chars_used + len(text) > TTS_SESSION_CHAR_BUDGET:
+            if self.session_id:
+                log_voice_event(
+                    self.session_id,
+                    "tts_skipped",
+                    error_reason="tts_character_budget_exhausted",
+                )
             logger.warning(
                 "TTS character budget exhausted (%d/%d) — skipping ElevenLabs",
                 self._chars_used, TTS_SESSION_CHAR_BUDGET,
@@ -59,6 +67,12 @@ class ElevenLabsTTS:
             return
 
         if not self.settings.elevenlabs_api_key:
+            if self.session_id:
+                log_voice_event(
+                    self.session_id,
+                    "tts_skipped",
+                    error_reason="missing_elevenlabs_api_key",
+                )
             logger.warning("ELEVENLABS_API_KEY not set — TTS skipped")
             await _send_json(ws, {"event": "tts_sentence_complete"})
             return
@@ -80,6 +94,12 @@ class ElevenLabsTTS:
         }
 
         try:
+            if self.session_id:
+                record_voice_timing(
+                    self.session_id,
+                    "tts_request_started_at",
+                    overwrite=False,
+                )
             async with httpx.AsyncClient(timeout=30.0) as client:
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
                     if response.status_code >= 500:
@@ -96,7 +116,15 @@ class ElevenLabsTTS:
                         return
 
                     self._chars_used += len(text)
+                    first_chunk = True
                     async for chunk in response.aiter_bytes(chunk_size=CHUNK_SIZE):
+                        if first_chunk and self.session_id:
+                            record_voice_timing(
+                                self.session_id,
+                                "tts_audio_ready_at",
+                                overwrite=False,
+                            )
+                            first_chunk = False
                         try:
                             await ws.send_bytes(chunk)
                         except Exception:

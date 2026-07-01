@@ -25,8 +25,10 @@ from src.services.audio.tts_client import ElevenLabsTTS, split_into_sentences
 from src.services.audio.voice_session import (
     get_voice_session,
     increment_voice_field,
+    log_voice_event,
     set_voice_field,
     append_transcript_turn,
+    transition_voice_state,
 )
 from src.types.interview import Question
 
@@ -39,6 +41,8 @@ SILENCE_GRACE_SECS = 30     # accept-thinking grace — delays first nudge when 
 COMPLETION_WAIT_TIMEOUT_SECS = 90.0
 COMPLETION_POLL_INTERVAL_SECS = 0.25
 MAX_CONSECUTIVE_SILENCE_STRIKES = 3
+PLAYBACK_ACK_TIMEOUT_SECS = 8.0
+LLM_TURN_TIMEOUT_SECS = 12.0
 
 # Spoken silence check-ins (deterministic — never LLM-generated).
 SILENCE_PROMPT_1 = "Take your time — I'm here whenever you're ready."
@@ -69,9 +73,11 @@ class VoiceTurnState:
         self.ws = ws
         self.bot_speaking = False
         self.current_tts_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
-        self.tts = ElevenLabsTTS()
+        self.tts = ElevenLabsTTS(session_id=session_id)
         self._silence_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
         self._silence_advance_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
+        self._playback_ack_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
+        self._playback_seq = 0
 
     def _track_task(self, attr_name: str, task: asyncio.Task) -> asyncio.Task:
         setattr(self, attr_name, task)
@@ -97,6 +103,11 @@ class VoiceTurnState:
         await _send_json(self.ws, {"event": "turn", "speaker": "candidate"})
 
         increment_voice_field(self.session_id, "barge_in_count")
+        transition_voice_state(
+            self.session_id,
+            "candidate_speaking",
+            "barge_in",
+        )
         logger.info("Barge-in detected session=%s", self.session_id)
 
     async def stream_response(
@@ -113,7 +124,15 @@ class VoiceTurnState:
             return
 
         self.bot_speaking = True
-        set_voice_field(self.session_id, "state", "BOT_SPEAKING")
+        self._playback_seq += 1
+        if self._playback_ack_task and not self._playback_ack_task.done():
+            self._playback_ack_task.cancel()
+        transition_voice_state(
+            self.session_id,
+            "bot_speaking",
+            "stream_response_started",
+            entry_type=entry_type,
+        )
         # Include text so the frontend live transcript can display it immediately
         # without waiting for a reconnect transcript_sync.
         await _send_json(self.ws, {"event": "turn", "speaker": "bot", "type": entry_type, "text": text})
@@ -167,8 +186,44 @@ class VoiceTurnState:
             return
 
         await _send_json(self.ws, {"event": "tts_turn_complete"})
+        self._start_playback_ack_watchdog(self._playback_seq)
 
-    def open_candidate_turn_after_playback(self) -> None:
+    def _start_playback_ack_watchdog(self, seq: int) -> None:
+        async def _watch() -> None:
+            try:
+                await asyncio.sleep(PLAYBACK_ACK_TIMEOUT_SECS)
+                session_data = get_voice_session(self.session_id)
+                if session_data is None:
+                    return
+                if seq != self._playback_seq:
+                    return
+                if session_data.get("state") != "BOT_SPEAKING":
+                    return
+                increment_voice_field(self.session_id, "playback_recoveries")
+                log_voice_event(
+                    self.session_id,
+                    "recovery_action",
+                    recovery_action="playback_ack_timeout_open_candidate_turn",
+                    audio_playback_status="tts_complete_missing",
+                )
+                transition_voice_state(
+                    self.session_id,
+                    "recovering",
+                    "playback_ack_timeout",
+                )
+                self.open_candidate_turn_after_playback(from_watchdog=True)
+                await _send_json(self.ws, {
+                    "event": "turn",
+                    "speaker": "candidate",
+                    "recovered": True,
+                    "reason": "playback_ack_timeout",
+                })
+            except asyncio.CancelledError:
+                pass
+
+        self._playback_ack_task = asyncio.create_task(_watch())
+
+    def open_candidate_turn_after_playback(self, from_watchdog: bool = False) -> None:
         """Open the response window after the browser confirms audio playback ended.
 
         If the voice session has ``silence_grace_pending`` set (written by the
@@ -176,7 +231,18 @@ class VoiceTurnState:
         first nudge is delayed by SILENCE_GRACE_SECS instead of SILENCE_PROMPT_SECS.
         The flag is cleared immediately after reading it.
         """
-        set_voice_field(self.session_id, "state", "WAITING_FOR_CANDIDATE")
+        current_task = asyncio.current_task()
+        if (
+            self._playback_ack_task
+            and not self._playback_ack_task.done()
+            and self._playback_ack_task is not current_task
+        ):
+            self._playback_ack_task.cancel()
+        transition_voice_state(
+            self.session_id,
+            "waiting_for_candidate_answer",
+            "playback_completed" if not from_watchdog else "playback_watchdog_recovered",
+        )
         session_data = get_voice_session(self.session_id)
         grace = bool(session_data and session_data.get("silence_grace_pending"))
         if grace:
@@ -197,7 +263,11 @@ class VoiceTurnState:
             return
 
         self.bot_speaking = True
-        set_voice_field(self.session_id, "state", "BOT_SPEAKING")
+        transition_voice_state(
+            self.session_id,
+            "bot_speaking",
+            "silence_prompt_started",
+        )
         await _send_json(self.ws, {
             "event": "interviewer_prompt",
             "text": text,
@@ -209,7 +279,11 @@ class VoiceTurnState:
                 await self.tts.stream_sentence(sentence, self.ws)
         finally:
             self.bot_speaking = False
-            set_voice_field(self.session_id, "state", "WAITING_FOR_CANDIDATE")
+            transition_voice_state(
+                self.session_id,
+                "waiting_for_candidate_answer",
+                "silence_prompt_completed",
+            )
 
     def _start_silence_monitor(self, grace: bool = False) -> None:
         if self._silence_task and not self._silence_task.done():
@@ -221,13 +295,15 @@ class VoiceTurnState:
             self._silence_task.cancel()
         if self._silence_advance_task and not self._silence_advance_task.done():
             self._silence_advance_task.cancel()
+        if self._playback_ack_task and not self._playback_ack_task.done():
+            self._playback_ack_task.cancel()
         self._silence_task = None
         self._silence_advance_task = None
+        self._playback_ack_task = None
 
     async def _advance_after_silence(self) -> None:
-        """Deterministically advance to the next question after the candidate
-        stays silent through the full nudge ladder. No LLM call — mirrors the
-        advance branch of run_llm_turn using code only.
+        """Recover from extended silence by re-asking the current question.
+        Passive silence is not an explicit skip.
         """
         try:
             voice_data = get_voice_session(self.session_id)
@@ -236,26 +312,35 @@ class VoiceTurnState:
 
             questions = [Question(**q) for q in json.loads(voice_data.get("questions", "[]"))]
             current_idx = int(voice_data.get("current_question_idx", 0))
-            next_idx = current_idx + 1
-            set_voice_field(self.session_id, "current_question_idx", next_idx)
-            set_voice_field(self.session_id, "follow_up_count", 0)
+            if current_idx >= len(questions):
+                from src.services.interview.voice_llm_orchestrator import _enter_wrap_up
 
-            # Lazy import: voice_llm_orchestrator imports this module's siblings;
-            # importing it at module load risks a circular import (same pattern as
-            # the lazy run_llm_turn import in process_voice_turn).
-            from src.services.interview.voice_llm_orchestrator import _enter_wrap_up
-
-            if next_idx >= len(questions):
-                invite = _enter_wrap_up(self.session_id, voice_data, lead_in=SILENCE_ADVANCE)
+                invite = _enter_wrap_up(self.session_id, voice_data)
                 await self.stream_response(invite, entry_type="wrap_up_invite")
                 return
 
-            next_q = questions[next_idx]
-            append_transcript_turn(
-                self.session_id, "bot", next_q.question_text, entry_type="question"
+            current_q = questions[current_idx]
+            set_voice_field(self.session_id, "current_question_id", current_q.id)
+            set_voice_field(self.session_id, "current_question_status", "waiting_for_answer")
+            log_voice_event(
+                self.session_id,
+                "recovery_action",
+                recovery_action="silence_reask_current_question",
+                question_id=current_q.id,
             )
-            spoken = f"{SILENCE_ADVANCE} {next_q.question_text}".strip()
-            await self.stream_response(spoken)
+
+            append_transcript_turn(
+                self.session_id,
+                "bot",
+                current_q.question_text,
+                entry_type="recovery_prompt",
+                question_id=current_q.id,
+            )
+            spoken = (
+                "I am still waiting for your answer to the previous question: "
+                f"{current_q.question_text}"
+            )
+            await self.stream_response(spoken, entry_type="recovery_prompt")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -264,7 +349,12 @@ class VoiceTurnState:
                 "event": "error",
                 "message": "I had trouble moving to the next question.",
             })
-            set_voice_field(self.session_id, "state", "WAITING_FOR_CANDIDATE")
+            transition_voice_state(
+                self.session_id,
+                "waiting_for_candidate_answer",
+                "silence_recovery_error",
+                error_reason=str(exc),
+            )
 
     async def _silence_monitor(self, grace: bool = False) -> None:
         try:
@@ -302,7 +392,7 @@ class VoiceTurnState:
             await _send_json(self.ws, {
                 "event": "silence_strike",
                 "count": strikes,
-                "action": "advance_question",
+                "action": "recover_current_question",
             })
             self._track_task(
                 "_silence_advance_task",
@@ -361,10 +451,36 @@ async def process_voice_turn(
     # Delegate to LLM orchestration (Feature [9] wires this in)
     from src.services.interview.voice_llm_orchestrator import run_llm_turn
     try:
-        response_text = await run_llm_turn(session_id=session_id, transcript=transcript)
+        response_text = await asyncio.wait_for(
+            run_llm_turn(session_id=session_id, transcript=transcript),
+            timeout=LLM_TURN_TIMEOUT_SECS,
+        )
+    except asyncio.TimeoutError:
+        logger.error("LLM turn timed out session=%s", session_id)
+        set_voice_field(session_id, "pending_answer_status", "failed")
+        log_voice_event(
+            session_id,
+            "recovery_action",
+            recovery_action="llm_timeout_fallback",
+            error_reason="llm_turn_timeout",
+            transcript=transcript,
+        )
+        transition_voice_state(
+            session_id,
+            "waiting_for_candidate_answer",
+            "llm_timeout_recovered",
+        )
+        response_text = "I had trouble processing that answer. Please repeat your answer to the same question."
     except Exception as exc:
         logger.error("LLM turn failed session=%s: %s", session_id, exc)
-        response_text = "I'm having a moment. Could you please repeat that?"
+        set_voice_field(session_id, "pending_answer_status", "failed")
+        transition_voice_state(
+            session_id,
+            "waiting_for_candidate_answer",
+            "llm_exception_recovered",
+            error_reason=str(exc),
+        )
+        response_text = "I had trouble processing that answer. Please repeat your answer to the same question."
 
     # Stream response through TTS
     await turn_state.stream_response(response_text)

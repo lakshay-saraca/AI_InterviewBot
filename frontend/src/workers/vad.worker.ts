@@ -8,7 +8,7 @@
  *
  * State machine:
  *   SILENT → (prob > 0.5) → SPEECH → (prob < 0.3) → TRAILING
- *   TRAILING → (silenceFrames >= 75) → SILENT  (1500ms silence)
+ *   TRAILING → (silenceFrames >= 110) → SILENT  (2200ms silence)
  *
  * Falls back to energy-based VAD if ONNX runtime is unavailable.
  */
@@ -18,15 +18,34 @@ type VadState = typeof VAD_STATES[keyof typeof VAD_STATES];
 
 const SPEECH_THRESHOLD = 0.5;
 const SILENCE_THRESHOLD = 0.3;
-const SILENCE_FRAMES_THRESHOLD = 75; // 75 × 20ms = 1500ms
+// 110 × 20ms = 2200ms. Raised from 75 (1500ms): a normal mid-answer thinking
+// pause was tripping speech_end, flushing a partial, and the bot talked over the
+// candidate. The server-side adaptive debounce remains the primary EOT signal;
+// this just keeps the VAD's crude verdict from firing on an ordinary pause.
+const SILENCE_FRAMES_THRESHOLD = 110;
 const ENERGY_THRESHOLD = 0.005;       // fallback energy threshold
 
 let state: VadState = VAD_STATES.SILENT;
 let silenceFrames = 0;
 
+// Listen mode: while the candidate's turn is open the main thread sets this true,
+// and we forward every audio frame to STT regardless of the VAD verdict. This makes
+// Deepgram the source of truth for "is the candidate talking" so a missed
+// speech_start (energy fallback under-detecting soft/slow speech) can't strand the
+// candidate in silence while the bot nags "are you still there".
+let listening = false;
+
 // ONNX session — loaded lazily
 let ortSession: unknown = null;
+let ortModule: any = null; // cached onnxruntime-web module (imported once)
 let useEnergyFallback = false;
+
+// Self-hosted onnxruntime-web entry. A bare 'onnxruntime-web' specifier cannot be
+// resolved by a browser worker at runtime (no import map) — that is why this code
+// always silently fell back to energy VAD. A real same-origin URL resolves; the
+// matching wasm binary is served from /onnx/ too. Kept out of the webpack/SWC build
+// (which crashed on the package) via webpackIgnore + a variable specifier.
+const ORT_ENTRY_URL = '/onnx/ort.wasm.bundle.min.mjs';
 
 // Silero VAD hidden states. Typed as ArrayBufferLike because ONNX Runtime
 // returns tensor data backed by ArrayBufferLike (possibly SharedArrayBuffer).
@@ -35,24 +54,31 @@ let c0: Float32Array<ArrayBufferLike> = new Float32Array(2 * 1 * 64);
 
 async function loadOnnxModel(): Promise<void> {
   try {
-    // Dynamic import — requires onnxruntime-web installed
-    // webpackIgnore: skip bundling — WASM package crashes SWC worker; runtime failure triggers energy fallback
-    const ort = await import(/* webpackIgnore: true */ 'onnxruntime-web');
+    const ort: any = await import(/* webpackIgnore: true */ ORT_ENTRY_URL);
     ort.env.wasm.wasmPaths = '/onnx/';
+    ort.env.wasm.numThreads = 1; // single-threaded: no SharedArrayBuffer / COOP+COEP needed
+    ortModule = ort;
     ortSession = await ort.InferenceSession.create('/models/silero_vad.onnx', {
       executionProviders: ['wasm'],
     });
-  } catch {
+  } catch (err) {
+    // Fail loud (Rule 9): degrading to crude RMS VAD must never be silent — it is the
+    // difference between reliable and missed speech detection.
     useEnergyFallback = true;
+    console.error('[vad] Silero ONNX load failed — using energy fallback:', err);
+    (self as unknown as Worker).postMessage({
+      event: 'vad_fallback',
+      reason: String(err),
+    });
   }
 }
 
 async function runSileroVAD(pcm: Float32Array): Promise<number> {
-  if (useEnergyFallback || !ortSession) return computeEnergy(pcm);
+  if (useEnergyFallback || !ortSession || !ortModule) return computeEnergy(pcm);
 
   try {
-    const ort = await import(/* webpackIgnore: true */ 'onnxruntime-web');
-    const session = ortSession as InstanceType<typeof ort.InferenceSession>;
+    const ort = ortModule;
+    const session = ortSession as any;
 
     const inputTensor = new ort.Tensor('float32', pcm, [1, pcm.length]);
     const srTensor = new ort.Tensor('int64', BigInt64Array.from([BigInt(16000)]), [1]);
@@ -128,8 +154,10 @@ async function handleChunk(pcm: Float32Array): Promise<void> {
       break;
   }
 
-  // Only forward audio when candidate is actively speaking
-  if (state === VAD_STATES.SPEECH || state === VAD_STATES.TRAILING) {
+  // Forward audio whenever the candidate's turn is open (listen mode) OR the VAD
+  // detects speech. Listen mode keeps STT fed even when the VAD misses speech_start;
+  // the VAD path still covers barge-in while the bot is speaking (listen mode off).
+  if (listening || state === VAD_STATES.SPEECH || state === VAD_STATES.TRAILING) {
     const int16 = float32ToInt16(pcm);
     // `self` is typed as Window under the DOM lib; cast to Worker to reach the
     // postMessage(message, transfer) overload for zero-copy transfer.
@@ -141,9 +169,15 @@ async function handleChunk(pcm: Float32Array): Promise<void> {
 }
 
 self.onmessage = async (evt: MessageEvent) => {
-  const { type, pcm } = evt.data as { type: string; pcm: Float32Array };
+  const { type, pcm, on } = evt.data as {
+    type: string;
+    pcm: Float32Array;
+    on?: boolean;
+  };
   if (type === 'audio') {
     await handleChunk(pcm);
+  } else if (type === 'listen') {
+    listening = Boolean(on);
   } else if (type === 'reset') {
     state = VAD_STATES.SILENT;
     silenceFrames = 0;

@@ -27,6 +27,34 @@ def build_answer_evaluation_prompt(
     key_points = question.rubric.get("key_points") if isinstance(question.rubric, dict) else None
     key_points_text = json.dumps(key_points) if key_points else json.dumps(question.rubric)
 
+    behavioral_instruction = f'''This is a behavioral/project question - do NOT emit <score_update>. Listen to the
+candidate's story, acknowledge warmly, and move on. No scoring is needed.
+
+Then decide the next action:
+- If the answer is sufficient, set action "acknowledge" (or "evaluating" if last question).
+- If you want to hear more detail, set action "follow_up" and put ONE follow-up in spoken_text.
+- If the candidate concedes or has been probed enough, acknowledge warmly and prepare to move on.'''
+
+    scoring_instruction = f'''Score the candidate's answer for topic "{question.topic}" by checking it against the
+expected key_points above - reward the points they actually covered, not confident phrasing.
+The score MUST reflect only what the CANDIDATE said: if they did not know, score low even if
+you go on to explain the answer. Never let your own explanation raise the score.
+
+Then decide the next action:
+- If the answer is comprehensive, set action "acknowledge" (or "evaluating" if last question).
+- If a key point is missing and probing is worthwhile, set action "follow_up" and put ONE
+  follow-up in spoken_text that targets the MISSING key point, pitched to a {session.experience_level.value}
+  candidate. Stay within this question's topic - never introduce a topic outside the job description.
+- If the candidate concedes or has been probed enough, acknowledge warmly ("no worries"),
+  optionally give a brief 2-3 sentence explanation built from the key_points (more for juniors,
+  usually skip for seniors), and prepare to move on.'''
+
+    turn_instruction = (
+        behavioral_instruction
+        if question.id.startswith(("behavioral_", "project_"))
+        else scoring_instruction
+    )
+
     return f"""
 <candidate_info>
   Name: {session.candidate_name}
@@ -56,25 +84,7 @@ def build_answer_evaluation_prompt(
 </running_scores>
 
 <turn_instruction>
-{f"""This is a behavioral/project question — do NOT emit <score_update>. Listen to the
-candidate's story, acknowledge warmly, and move on. No scoring is needed.
-
-Then decide the next action:
-- If the answer is sufficient, set action "acknowledge" (or "evaluating" if last question).
-- If you want to hear more detail, set action "follow_up" and put ONE follow-up in spoken_text.
-- If the candidate concedes or has been probed enough, acknowledge warmly and prepare to move on.""" if question.id.startswith(("behavioral_", "project_")) else f"""Score the candidate's answer for topic "{question.topic}" by checking it against the
-expected key_points above — reward the points they actually covered, not confident phrasing.
-The score MUST reflect only what the CANDIDATE said: if they did not know, score low even if
-you go on to explain the answer. Never let your own explanation raise the score.
-
-Then decide the next action:
-- If the answer is comprehensive, set action "acknowledge" (or "evaluating" if last question).
-- If a key point is missing and probing is worthwhile, set action "follow_up" and put ONE
-  follow-up in spoken_text that targets the MISSING key point, pitched to a {session.experience_level.value}
-  candidate. Stay within this question's topic — never introduce a topic outside the job description.
-- If the candidate concedes or has been probed enough, acknowledge warmly ("no worries"),
-  optionally give a brief 2-3 sentence explanation built from the key_points (more for juniors,
-  usually skip for seniors), and prepare to move on."""}
+{turn_instruction}
 </turn_instruction>
 
 Candidate's answer: {answer}
@@ -130,12 +140,29 @@ def build_voice_answer_evaluation_prompt(
     key_points = question.rubric.get("key_points") if isinstance(question.rubric, dict) else None
     key_points_text = json.dumps(key_points) if key_points else json.dumps(question.rubric)
 
+    acknowledge_advance_behavioral = f'''
+  This is a behavioral/project question - do NOT emit <score_update>. Just acknowledge
+  warmly and move on.'''
+
+    acknowledge_advance_scored = f'''
+  This is the ONLY action that records a score. Emit <score_update> for topic "{question.topic}"
+  scoring the WHOLE exchange against the key_points listed above; the score must
+  reflect only what the CANDIDATE said. Do NOT let your own explanation inflate it.
+  Calibrate depth of expectation to a {session.experience_level.value} candidate -
+  award partial credit for direction-correct answers.'''
+
+    acknowledge_advance_detail = (
+        acknowledge_advance_behavioral
+        if question.id.startswith(("behavioral_", "project_"))
+        else acknowledge_advance_scored
+    )
+
     turn_instruction = f"""The candidate may have asked you a clarifying question, gone off-topic, asked for
 time to think, or given a partial or complete answer. Read what just happened and
 choose the ONE action that fits:
 
 - answer_clarification: the candidate asked YOU about the question's meaning, scope,
-  or an assumption. Answer briefly and naturally — do NOT score; do NOT emit
+  or an assumption. Answer briefly and naturally - do NOT score; do NOT emit
   <score_update>; do NOT advance.
 
 - accept_thinking: the candidate asked for time to think or said they need a moment.
@@ -149,14 +176,7 @@ choose the ONE action that fits:
   worth probing. Ask ONE focused follow-up. Do NOT emit <score_update> yet.
 
 - acknowledge_advance: the candidate has answered (or conceded, or been probed
-  enough). Keep spoken_text to a brief acknowledgement — no questions.{f"""
-  This is a behavioral/project question — do NOT emit <score_update>. Just acknowledge
-  warmly and move on.""" if question.id.startswith(("behavioral_", "project_")) else f"""
-  This is the ONLY action that records a score. Emit <score_update> for topic "{question.topic}"
-  scoring the WHOLE exchange against the key_points listed above; the score must
-  reflect only what the CANDIDATE said. Do NOT let your own explanation inflate it.
-  Calibrate depth of expectation to a {session.experience_level.value} candidate —
-  award partial credit for direction-correct answers."""}
+  enough). Keep spoken_text to a brief acknowledgement - no questions.{acknowledge_advance_detail}
 
 Never emit <score_update> on any action other than acknowledge_advance."""
 

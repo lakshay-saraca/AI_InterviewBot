@@ -138,25 +138,63 @@ _CONJUNCTION_IN_BODY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Imperative "ask" verbs that request the candidate to produce an answer now.
+# Matched only at a clause head (sentence start, or just after a comma/semicolon)
+# so mid-sentence uses ("...and explain why") never false-trigger. Scenario-framing
+# verbs (imagine / suppose / consider) are deliberately EXCLUDED — they set up a
+# single question, they are not a second ask.
+_ASK_VERB_HEAD_RE = re.compile(
+    r"(?:^|[,;])\s*"
+    r"(walk|tell|describe|explain|give|share|outline|discuss|elaborate|provide|talk)\b",
+    re.IGNORECASE,
+)
+
+# Extra connectors that attach a second question. Unlike the Shape B list, these
+# are only treated as compound-splitters when they follow a clause boundary
+# (comma or semicolon), so mid-question adverbs ("how do you also handle X?") and
+# subordinating uses are preserved.
+_BOUNDARY_CONNECTORS = ("in addition", "also")
+
+
+def _is_ask_sentence(sentence: str) -> bool:
+    """A sentence is an 'ask' if it ends in '?' or opens (at a clause head) with an
+    imperative request verb ("Walk me through...", "..., describe...")."""
+    s = sentence.strip()
+    if not s:
+        return False
+    if s.endswith("?"):
+        return True
+    return bool(_ASK_VERB_HEAD_RE.search(s))
+
 
 def validate_single_question(spoken_text: str) -> str:
     """Enforce that spoken_text contains only one question per turn.
 
-    Two shapes of compound questions are detected and repaired:
+    Three shapes of compound questions are detected and repaired:
 
     Shape A — multiple '?' (the LLM included two explicit question sentences):
         Truncated after the first '?' regardless of conjunction presence.
 
-    Shape B — single shared terminal '?' with a compound conjunction
-    ("and also", "as well as", "along with", or "and") in the body:
+    Shape C — multiple asks spread across sentences with 0-1 '?', e.g. an
+    imperative "Walk me through X." followed by "Describe Y." or a
+    "Can you give an example?" These are the planner-shaped compounds (the
+    planner writes questions in "one or two sentences"): kept up to and including
+    the FIRST ask, later asks dropped. An ask is a sentence ending in '?' or one
+    opening with an imperative request verb; scenario-setup sentences are not asks,
+    so "You're on a legacy codebase. How would you test it?" is left intact.
+
+    Shape B — single shared terminal '?' with a compound conjunction in the body
+    ("and also", "as well as", "along with"; plus "in addition"/"also" when they
+    follow a clause boundary):
         Truncated before the conjunction, then a '?' is appended to preserve
         the first question's interrogative nature.
 
     Single questions — including those with clarifying sub-clauses that use
-    a single '?' — are returned unchanged.
+    a single '?', and single questions with a scenario-setup sentence — are
+    returned unchanged.
 
     Edge cases:
-    - Empty string or no '?' → returned unchanged.
+    - Empty string → returned unchanged.
     """
     if not spoken_text:
         return spoken_text
@@ -168,6 +206,13 @@ def validate_single_question(spoken_text: str) -> str:
         first_q = spoken_text.find("?")
         return spoken_text[: first_q + 1].rstrip()
 
+    # Shape C: multiple asks across sentences (0-1 '?'). Keep up to the first ask.
+    sentences = re.split(r"(?<=[.!?])\s+", spoken_text.strip())
+    if len(sentences) > 1:
+        ask_indices = [i for i, s in enumerate(sentences) if _is_ask_sentence(s)]
+        if len(ask_indices) >= 2:
+            return " ".join(sentences[: ask_indices[0] + 1]).strip()
+
     if question_mark_count == 0:
         # No question at all — pass through (acknowledgement, statement, etc.).
         return spoken_text
@@ -176,9 +221,8 @@ def validate_single_question(spoken_text: str) -> str:
     # Shape B: single terminal '?' with a compound conjunction in the body.
     # Order matters: check longer/more-specific conjunctions before shorter ones
     # to avoid "and also" being split on "and".
-    conjunctions = ["and also", "as well as", "along with"]
     text_lower = spoken_text.lower()
-    for conj in conjunctions:
+    for conj in ["and also", "as well as", "along with"]:
         idx = text_lower.find(conj)
         if idx == -1:
             continue
@@ -192,5 +236,18 @@ def validate_single_question(spoken_text: str) -> str:
         if len(before_words) >= 2 and len(after_words) >= 2:
             # Truncate before the conjunction and re-add '?'.
             return before.rstrip(" ,") + "?"
+
+    # Boundary connectors ("in addition", "also") — only when they follow a comma
+    # or semicolon, so mid-question adverbs are not falsely split.
+    for conj in _BOUNDARY_CONNECTORS:
+        m = re.search(r"[,;]\s*" + re.escape(conj) + r"\b", text_lower)
+        if not m:
+            continue
+        before = spoken_text[: m.start()].strip(" ,;")
+        after = spoken_text[m.end():].strip(" ,;?")
+        before_words = [w for w in before.split() if len(w) >= 3]
+        after_words = [w for w in after.split() if len(w) >= 3]
+        if len(before_words) >= 2 and len(after_words) >= 2:
+            return before.rstrip(" ,;") + "?"
 
     return spoken_text

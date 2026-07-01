@@ -98,7 +98,7 @@ async def start_voice_session(body: VoiceSessionStartRequest, request: Request) 
         )
 
     intro_text = generate_introduction(body.candidate_name, body.job_role, len(questions))
-    create_voice_session(
+    voice_session = create_voice_session(
         session_id=session_id,
         candidate_name=body.candidate_name,
         job_role=body.job_role,
@@ -126,7 +126,7 @@ async def start_voice_session(body: VoiceSessionStartRequest, request: Request) 
     return VoiceSessionStartResponse(
         session_id=session_id,
         token=token,
-        state="INITIALIZING",
+        state=voice_session.get("state", "INITIALIZING"),
         ws_url=f"{ws_base}/ws/interview/voice/{session_id}?token={token}",
     )
 
@@ -302,7 +302,7 @@ async def start_from_draft(body: StartFromDraftRequest, request: Request) -> Voi
     intro_text = generate_introduction(body.candidate_name, job_role, len(plan.questions))
     ease_in_text = build_ease_in(body.candidate_name)
     jd_summary = JDSummary(skills=draft.skills)
-    create_voice_session(
+    voice_session = create_voice_session(
         session_id=session_id,
         candidate_name=body.candidate_name,
         job_role=job_role,
@@ -326,7 +326,7 @@ async def start_from_draft(body: StartFromDraftRequest, request: Request) -> Voi
     return VoiceSessionStartResponse(
         session_id=session_id,
         token=token,
-        state="INITIALIZING",
+        state=voice_session.get("state", "INITIALIZING"),
         ws_url=f"{ws_base}/ws/interview/voice/{session_id}?token={token}",
     )
 

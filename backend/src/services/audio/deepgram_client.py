@@ -17,7 +17,7 @@ from src.lib.settings import get_settings
 logger = logging.getLogger(__name__)
 
 OnTranscriptCallback = Callable[
-    [str, bool, float],  # (transcript_text, is_final, confidence)
+    [str, bool, float, bool],  # (transcript_text, is_final, confidence, speech_final)
     Coroutine[Any, Any, None],
 ]
 
@@ -145,14 +145,14 @@ class DeepgramSTTStream:
             if text == self._last_committed or self._last_committed.startswith(text):
                 return
             self._last_committed = text
-            await self.on_transcript(text, True, confidence)
+            await self.on_transcript(text, True, confidence, True)
         elif is_final:
             # Intermediate finalised sentence (not yet end-of-utterance).
             # Pass is_final=True so voice_ws.py accumulates it alongside
             # speech_final segments — preventing multi-sentence truncation.
-            await self.on_transcript(text, True, confidence)
+            await self.on_transcript(text, True, confidence, False)
         else:
-            await self.on_transcript(text, False, confidence)
+            await self.on_transcript(text, False, confidence, False)
 
     async def _on_error(self, *args: Any, **_: Any) -> None:
         error = args[0] if args else "unknown"
@@ -219,5 +219,11 @@ class DeepgramManager:
                 await asyncio.sleep(delay)
                 await self._create_and_connect()
 
-    async def _handle_transcript(self, text: str, is_final: bool, confidence: float = 1.0) -> None:
-        await self.on_transcript(text, is_final, confidence)
+    async def _handle_transcript(
+        self,
+        text: str,
+        is_final: bool,
+        confidence: float = 1.0,
+        speech_final: bool = True,
+    ) -> None:
+        await self.on_transcript(text, is_final, confidence, speech_final)

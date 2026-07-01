@@ -18,6 +18,7 @@ export type CaptureState = 'idle' | 'speaking' | 'processing' | 'bot_speaking';
 const SAMPLE_RATE = 48000;
 const RECONNECT_DELAY_MS = 2000;
 const MAX_RECONNECTS = 5;
+const PLAYBACK_COMPLETE_FALLBACK_MS = 10000;
 
 export class VoiceCapture {
   onStateChange: (state: CaptureState) => void = () => {};
@@ -39,10 +40,15 @@ export class VoiceCapture {
   private pendingPlaybackCount = 0;
   private playbackWaiters: Array<() => void> = [];
   private turnCompletePending = false;
+  private playbackStartedForTurn = false;
   private reconnectCount = 0;
   private stopped = false;
   private endingSession = false;
   private currentState: CaptureState = 'idle';
+  // True while the candidate's turn is open. When set, we forward mic audio to the
+  // server regardless of the VAD verdict so STT (Deepgram) hears the candidate even
+  // if the VAD misses speech_start. Kept in sync with the worker's own listen flag.
+  private listening = false;
 
   constructor(wsUrl: string) {
     this.wsUrl = wsUrl;
@@ -115,6 +121,10 @@ export class VoiceCapture {
     const startAt = Math.max(this.audioCtx.currentTime, this.nextPlayTime);
     this.pendingPlaybackCount++;
     source.start(startAt);
+    if (!this.playbackStartedForTurn) {
+      this.playbackStartedForTurn = true;
+      this._sendControl({ event: 'tts_playback_started' });
+    }
     this.nextPlayTime = startAt + decoded.duration;
 
     this.scheduledSources.push(source);
@@ -154,7 +164,24 @@ export class VoiceCapture {
     const waiters = this.playbackWaiters.splice(0);
     waiters.forEach((resolve) => resolve());
     this.turnCompletePending = false;
+    this.playbackStartedForTurn = false;
     this.nextPlayTime = 0;
+  }
+
+  private _waitForPlaybackCompletion(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = window.setTimeout(() => {
+        this.pendingPlaybackCount = 0;
+        const waiters = this.playbackWaiters.splice(0);
+        waiters.forEach((waiter) => waiter());
+        resolve();
+      }, PLAYBACK_COMPLETE_FALLBACK_MS);
+
+      this.playbackWaiters.push(() => {
+        window.clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 
   private async _ackTtsCompleteAfterPlayback(): Promise<void> {
@@ -167,7 +194,7 @@ export class VoiceCapture {
       if (this.stopped || gen !== this.audioGen) return;
 
       if (this.pendingPlaybackCount > 0) {
-        await new Promise<void>((resolve) => this.playbackWaiters.push(resolve));
+        await this._waitForPlaybackCompletion();
       }
 
       if (!this.stopped && gen === this.audioGen && this.turnCompletePending) {
@@ -223,10 +250,20 @@ export class VoiceCapture {
       } else if (event === 'speech_end') {
         this._setState('processing');
         this._sendControl({ event: 'speech_end' });
+      } else if (event === 'vad_fallback') {
+        // Silero failed to load — we're on crude energy VAD. Surface it (Rule 9);
+        // speech detection is less reliable until the /onnx assets are in place.
+        console.warn(
+          '[voice] VAD degraded to energy fallback (Silero not loaded). ' +
+            'Run "npm run setup:vad" to vendor the ONNX assets.'
+        );
       } else if (event === 'audio_chunk' && pcm) {
-        // Only send during active states — bot_speaking means barge-in
+        // Forward while the candidate's turn is open (listening), while actively
+        // speaking, or during bot speech (barge-in). listening keeps STT fed even
+        // when the VAD never reported speech_start.
         if (
-          (this.currentState === 'speaking' ||
+          (this.listening ||
+            this.currentState === 'speaking' ||
             this.currentState === 'bot_speaking') &&
           this.ws?.readyState === WebSocket.OPEN
         ) {
@@ -283,10 +320,15 @@ export class VoiceCapture {
       );
     } else if (event === 'turn') {
       const speaker = data.speaker as string;
+      if (speaker === 'bot') this.playbackStartedForTurn = false;
       this._setState(speaker === 'bot' ? 'bot_speaking' : 'idle');
+      // Candidate's turn opens listen mode; bot's turn closes it.
+      this._setListening(speaker !== 'bot');
     } else if (event === 'barge_in') {
       this.stopBotAudio();
       this._setState('speaking');
+      // Server cancelled the bot — the floor is the candidate's now.
+      this._setListening(true);
     } else if (event === 'ping') {
       this._sendControl({ event: 'pong' });
     } else if (event === 'tts_sentence_complete') {
@@ -318,6 +360,12 @@ export class VoiceCapture {
       this.currentState = next;
       this.onStateChange(next);
     }
+  }
+
+  /** Toggle listen mode locally and in the VAD worker (kept in sync). */
+  private _setListening(on: boolean): void {
+    this.listening = on;
+    this.vadWorker?.postMessage({ type: 'listen', on });
   }
 
   private _scheduleReconnect(): void {
