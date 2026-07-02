@@ -11,6 +11,7 @@ import logging
 import os
 
 from src.lib.anthropic_client import get_anthropic_client, get_model_for_task
+from src.services.llm.response_parser import validate_single_question
 from src.types.interview import ExperienceLevel
 from src.types.planning import InterviewPlanDraft, PlannedQuestion
 
@@ -46,7 +47,11 @@ def plan_interview(
 
     try:
         client = get_anthropic_client()
-        response = client.messages.create(
+        # No retry on the planner path: a stalled first attempt would otherwise
+        # double the wait and hang the "Generating plan" screen. Allow up to 85s
+        # for a single attempt (the shared client default is 30s, too tight for a
+        # large JD) — the frontend aborts at 90s, just above this.
+        response = client.with_options(max_retries=0, timeout=85.0).messages.create(
             model=get_model_for_task("planner"),
             max_tokens=2500,
             messages=[{"role": "user", "content": prompt}],
@@ -70,6 +75,11 @@ def plan_interview(
         text = str(q.get("question_text", "")).strip()
         if not text:
             continue
+        # Backstop: the planner is instructed to author one question per item, but
+        # it is an LLM and occasionally packs two asks into one question_text. Clamp
+        # here, once, so the stored question is single everywhere it is later read
+        # (opening question, acknowledge_advance hand-off, re-poses, admin preview).
+        text = validate_single_question(text)
         difficulty = str(q.get("difficulty", "medium")).lower()
         if difficulty not in _VALID_DIFFICULTY:
             difficulty = "medium"
@@ -95,5 +105,7 @@ def plan_interview(
         role_title=str(data.get("role_title", "")).strip() or job_role,
         skills=[str(s).strip() for s in data.get("skills", []) if str(s).strip()][:8],
         questions=questions,
-        project_question_text=str(data.get("project_question_text", "")).strip(),
+        project_question_text=validate_single_question(
+            str(data.get("project_question_text", "")).strip()
+        ),
     )

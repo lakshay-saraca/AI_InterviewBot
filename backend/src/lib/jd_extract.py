@@ -1,8 +1,12 @@
-"""Extract plain text from an uploaded JD file (PDF or DOCX).
+"""Extract plain text from an uploaded JD file (PDF, DOCX, TXT or MD).
 
 Fails loud (raises JDExtractError) on unsupported extension, unreadable bytes, or
 empty/whitespace-only extracted text — never returns "". A silently empty JD would
 produce a JD-less interview, which defeats the feature.
+
+Supported extensions here MUST stay in sync with the frontend file picker's
+`accept` attribute (frontend/src/app/interview/voice/start/page.tsx). A format the
+UI offers but this rejects is an instant 422 on every upload.
 """
 import io
 import logging
@@ -29,6 +33,12 @@ def _extract_docx(data: bytes) -> str:
     return "\n".join(p.text for p in doc.paragraphs)
 
 
+def _extract_plaintext(data: bytes) -> str:
+    # errors="replace" so a stray non-UTF-8 byte degrades one character rather than
+    # failing the whole upload; the empty-text guard below still catches junk files.
+    return data.decode("utf-8", errors="replace")
+
+
 def extract_jd_text(filename: str | None, data: bytes) -> str:
     ext = os.path.splitext(filename or "")[1].lower()
     try:
@@ -36,6 +46,8 @@ def extract_jd_text(filename: str | None, data: bytes) -> str:
             text = _extract_pdf(data)
         elif ext == ".docx":
             text = _extract_docx(data)
+        elif ext in (".txt", ".md"):
+            text = _extract_plaintext(data)
         else:
             raise JDExtractError(f"Unsupported JD file type: {ext or '(none)'}")
     except JDExtractError:

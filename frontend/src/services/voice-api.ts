@@ -45,6 +45,11 @@ export async function startVoiceSession(
 
 const ADMIN_KEY = process.env.NEXT_PUBLIC_ADMIN_API_KEY ?? "change-me-admin-key";
 
+// Client-side ceiling on plan generation. Sits just above the backend planner's
+// 85s timeout (retry dropped) so a valid slow run isn't cut off, but a true hang
+// fails fast instead of leaving the loading screen spinning forever.
+const PLAN_TIMEOUT_MS = 90_000;
+
 export async function previewPlan(
   form: FormData
 ): Promise<PlanPreviewResponse> {
@@ -52,12 +57,34 @@ export async function previewPlan(
   logVoiceApiDebug("preview-plan-request", {
     url: `${API_BASE}/api/v1/voice/plan/preview`,
     formKeys: Array.from(form.keys()),
+    timeoutMs: PLAN_TIMEOUT_MS,
   });
-  const res = await fetch(`${API_BASE}/api/v1/voice/plan/preview`, {
-    method: "POST",
-    headers: { "X-Admin-Key": ADMIN_KEY },
-    body: form,
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), PLAN_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/api/v1/voice/plan/preview`, {
+      method: "POST",
+      headers: { "X-Admin-Key": ADMIN_KEY },
+      body: form,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      logVoiceApiDebug("preview-plan-timeout", {
+        elapsedMs: Math.round(performance.now() - startedAt),
+        timeoutMs: PLAN_TIMEOUT_MS,
+      });
+      throw new ApiClientError(
+        "Plan generation timed out",
+        408,
+        `The planner took longer than ${PLAN_TIMEOUT_MS / 1000}s. Please try again.`
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   logVoiceApiDebug("preview-plan-response", {
     status: res.status,
     ok: res.ok,

@@ -65,6 +65,7 @@ async def test_stream_response_waits_for_playback_ack_before_candidate_turn(fake
         message.get("event") == "tts_turn_complete"
         for message in fake_ws.json_messages
     )
+    state.cancel_silence_monitor()
 
 
 @pytest.mark.asyncio
@@ -171,10 +172,8 @@ async def test_speech_start_cancels_pending_nudges(fake_ws, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_advance_after_silence_moves_to_next_question(fake_ws):
-    """Continued silence must actually progress the interview: bump the question
-    index and SPEAK the next question. A test that only checked silence_strikes
-    would have passed against the old no-op."""
+async def test_advance_after_silence_reasks_current_question(fake_ws):
+    """Continued silence must recover without skipping the unanswered question."""
     seed_voice_session("s-adv", [make_question("q1", "python"), make_question("q2", "sql")])
     state = vtp.VoiceTurnState("s-adv", fake_ws)
     tts = _RecordingTTS()
@@ -183,14 +182,15 @@ async def test_advance_after_silence_moves_to_next_question(fake_ws):
     await state._advance_after_silence()
     state.cancel_silence_monitor()  # stop the fresh monitor stream_response started
 
-    assert int(get_voice_session("s-adv")["current_question_idx"]) == 1, "did not advance"
-    assert "sql" in " ".join(tts.spoken).lower(), "next question was not spoken"
+    assert int(get_voice_session("s-adv")["current_question_idx"]) == 0, "silence skipped the current question"
+    joined = " ".join(tts.spoken).lower()
+    assert "python" in joined, "current question was not re-asked"
+    assert "sql" not in joined, "next question was spoken before the current answer was handled"
 
 
 @pytest.mark.asyncio
-async def test_advance_after_silence_enters_wrap_up_at_last_question(fake_ws):
-    """When the last question times out, the AI wraps up instead of advancing into
-    an empty question list."""
+async def test_advance_after_silence_reasks_last_question(fake_ws):
+    """When the last unanswered question times out, it is still re-asked."""
     seed_voice_session("s-wrap", [make_question("q1", "python")])
     state = vtp.VoiceTurnState("s-wrap", fake_ws)
     tts = _RecordingTTS()
@@ -199,9 +199,10 @@ async def test_advance_after_silence_enters_wrap_up_at_last_question(fake_ws):
     await state._advance_after_silence()
     state.cancel_silence_monitor()
 
-    assert get_voice_session("s-wrap")["interview_phase"] == "wrap_up"
     joined = " ".join(tts.spoken).lower()
-    assert "anything you'd like to ask" in joined, "wrap-up invite was not spoken"
+    assert int(get_voice_session("s-wrap")["current_question_idx"]) == 0
+    assert "python" in joined, "last question was not re-asked"
+    assert "anything you'd like to ask" not in joined, "silence entered wrap-up before an answer"
 
 
 @pytest.mark.asyncio

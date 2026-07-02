@@ -31,6 +31,7 @@ from src.services.audio.voice_session import (
     get_voice_session,
     release_lock,
     set_voice_field,
+    transition_voice_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -186,7 +187,7 @@ async def run_voice_evaluation(session_id: str) -> InterviewReport:
     if voice_data is None:
         raise ValueError(f"Voice session {session_id} not found")
 
-    set_voice_field(session_id, "state", "EVALUATING")
+    transition_voice_state(session_id, "evaluating", "voice_evaluation_started")
     logger.info(
         "Voice evaluation started session=%s transcript_turns=%d questions=%d",
         session_id,
@@ -240,7 +241,7 @@ async def run_voice_evaluation(session_id: str) -> InterviewReport:
     if not saved:
         logger.warning("Report not persisted to PG for session %s — Redis still has it", session_id)
 
-    set_voice_field(session_id, "state", "COMPLETE")
+    transition_voice_state(session_id, "complete", "voice_evaluation_completed")
     set_voice_field(session_id, "ended_at", now)
     set_voice_field(session_id, "evaluation_report", report.model_dump_json())
 

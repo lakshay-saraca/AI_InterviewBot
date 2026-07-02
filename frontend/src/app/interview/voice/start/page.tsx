@@ -186,7 +186,23 @@ export default function VoiceStartPage() {
     setError(null);
   };
 
-  if (phase === "form" || phase === "generating") {
+  if (phase === "generating") {
+    return (
+      <div className="max-w-xl mx-auto flex flex-col items-center justify-center min-h-[70vh] text-center">
+        <div className="h-14 w-14 rounded-full border-4 border-violet-200 border-t-violet-600 animate-spin mb-6" />
+        <h1 className="text-2xl font-bold text-slate-900 mb-2">
+          Generating your interview plan
+        </h1>
+        <p className="text-slate-500 text-sm max-w-sm">
+          Analyzing the job description{resumeFile ? " and resume" : ""} to build
+          grounded, role-specific questions. This usually takes 15-35 seconds.
+        </p>
+        <p className="text-slate-400 text-xs mt-4">Please keep this tab open.</p>
+      </div>
+    );
+  }
+
+  if (phase === "form") {
     return (
       <div className="max-w-xl mx-auto">
         <div className="flex items-center gap-3 mb-6">
@@ -316,10 +332,10 @@ export default function VoiceStartPage() {
 
           <button
             type="submit"
-            disabled={phase === "generating" || !jdFile}
+            disabled={!jdFile}
             className="w-full bg-violet-600 hover:bg-violet-700 disabled:bg-violet-400 text-white font-semibold py-3 rounded-xl text-base transition-colors"
           >
-            {phase === "generating" ? "Generating plan..." : "Generate Interview Plan"}
+            Generate Interview Plan
           </button>
         </form>
       </div>

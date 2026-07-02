@@ -24,7 +24,7 @@ def get_async_anthropic_client() -> anthropic.AsyncAnthropic:
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set")
-    return anthropic.AsyncAnthropic(api_key=api_key)
+    return anthropic.AsyncAnthropic(api_key=api_key, timeout=15.0, max_retries=1)
 
 
 def get_model_for_task(task: str) -> str:

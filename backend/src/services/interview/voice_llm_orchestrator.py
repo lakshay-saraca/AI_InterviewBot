@@ -25,8 +25,11 @@ from src.lib.anthropic_client import get_async_anthropic_client, get_model_for_t
 from src.services.audio.voice_session import (
     get_voice_session,
     increment_voice_field,
+    log_voice_event,
+    record_voice_timing,
     set_voice_field,
     append_transcript_turn,
+    transition_voice_state,
 )
 from src.services.llm.prompt_builder import (
     build_voice_system_prompt,
@@ -48,6 +51,37 @@ LOW_CONFIDENCE_THRESHOLD = 0.5
 # Maximum number of consecutive non-advancing turns before the loop guard fires
 # and forces an acknowledge_advance regardless of the LLM's choice.
 LOOP_GUARD_MAX = 3
+LLM_MAX_TOKENS = 512
+
+_WAKE_PHRASES = {
+    "hello",
+    "hi",
+    "hey",
+    "are you there",
+    "are you still there",
+    "can you hear me",
+    "can you hear",
+    "you there",
+    "are we still connected",
+    "is this working",
+}
+_WAKE_WORDS = {
+    "hello",
+    "hi",
+    "hey",
+    "are",
+    "you",
+    "there",
+    "still",
+    "can",
+    "hear",
+    "me",
+    "we",
+    "connected",
+    "is",
+    "this",
+    "working",
+}
 
 
 def max_follow_ups_for(question: Question) -> int:
@@ -102,6 +136,96 @@ def _normalize_action(a: str) -> str:
     if normalized in _VALID:
         return normalized
     return "acknowledge_advance"
+
+
+def _is_wake_phrase(text: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9\s']", " ", text.lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return False
+    if normalized in _WAKE_PHRASES:
+        return True
+    words = normalized.split()
+    if (
+        len(words) <= 5
+        and all(word in _WAKE_WORDS for word in words)
+        and any(phrase in normalized for phrase in _WAKE_PHRASES)
+    ):
+        return True
+    return False
+
+
+def _current_question_from_data(voice_data: dict[str, Any]) -> Question | None:
+    questions_raw: list[dict] = json.loads(voice_data.get("questions", "[]"))
+    if not questions_raw:
+        return None
+    current_idx = int(voice_data.get("current_question_idx", 0))
+    if current_idx >= len(questions_raw):
+        return None
+    return Question(**questions_raw[current_idx])
+
+
+def _handle_wake_phrase(session_id: str, transcript: str, voice_data: dict[str, Any]) -> str:
+    current_q = _current_question_from_data(voice_data)
+    append_transcript_turn(session_id, "candidate", transcript, entry_type="wake_phrase")
+    transition_voice_state(
+        session_id,
+        "recovering",
+        "wake_phrase_detected",
+        transcript=transcript,
+        wake_phrase_detected=True,
+    )
+
+    if current_q is None:
+        response = "I am here. We were at the wrap-up stage of the interview."
+        append_transcript_turn(session_id, "bot", response, entry_type="recovery_prompt")
+        log_voice_event(
+            session_id,
+            "recovery_action",
+            recovery_action="wake_phrase_wrap_up_reminder",
+            transcript=transcript,
+            wake_phrase_detected=True,
+        )
+        return response
+
+    pending_status = str(voice_data.get("pending_answer_status", "") or "")
+    if pending_status == "processing":
+        response = (
+            "I heard your last answer and I am still processing it. "
+            f"Let's stay with the same question: {current_q.question_text}"
+        )
+        action = "wake_phrase_pending_answer_processing"
+    elif pending_status == "failed":
+        response = (
+            "I had trouble processing your last answer. Please repeat your answer "
+            f"to the previous question: {current_q.question_text}"
+        )
+        action = "wake_phrase_pending_answer_failed"
+    else:
+        response = (
+            "I am still waiting for your answer to the previous question: "
+            f"{current_q.question_text}"
+        )
+        action = "wake_phrase_reask_current_question"
+
+    set_voice_field(session_id, "current_question_id", current_q.id)
+    set_voice_field(session_id, "current_question_status", "waiting_for_answer")
+    append_transcript_turn(
+        session_id,
+        "bot",
+        response,
+        entry_type="recovery_prompt",
+        question_id=current_q.id,
+    )
+    log_voice_event(
+        session_id,
+        "recovery_action",
+        recovery_action=action,
+        transcript=transcript,
+        wake_phrase_detected=True,
+        question_id=current_q.id,
+    )
+    return response
 
 
 def _acknowledgment_only(spoken: str) -> str:
@@ -239,9 +363,24 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
 
     current_q = questions[current_idx]
 
+    if _is_wake_phrase(transcript):
+        return _handle_wake_phrase(session_id, transcript, voice_data)
+
     # A real candidate utterance arrived — consume any prior accept_thinking grace.
     # The accept_thinking branch below will re-set it if appropriate.
     set_voice_field(session_id, "silence_grace_pending", "")
+    set_voice_field(session_id, "current_question_id", current_q.id)
+    set_voice_field(session_id, "current_question_status", "processing_answer")
+    set_voice_field(session_id, "pending_answer_text", transcript)
+    set_voice_field(session_id, "pending_answer_question_id", current_q.id)
+    set_voice_field(session_id, "pending_answer_status", "processing")
+    transition_voice_state(
+        session_id,
+        "bot_generating_response",
+        "llm_turn_started",
+        question_id=current_q.id,
+        transcript=transcript,
+    )
 
     # Record the candidate's answer in the transcript before calling the LLM.
     # Tagging with question_id allows deterministic Q/A extraction during evaluation
@@ -265,17 +404,68 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
 
     try:
         client = get_async_anthropic_client()
+        record_voice_timing(
+            session_id,
+            "llm_request_started_at",
+            question_id=current_q.id,
+            transcript=transcript,
+        )
         response = await client.messages.create(
             model=get_model_for_task("interview"),
-            max_tokens=1024,
+            max_tokens=LLM_MAX_TOKENS,
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
+        )
+        record_voice_timing(
+            session_id,
+            "llm_first_token_at",
+            question_id=current_q.id,
+            streaming=False,
+        )
+        record_voice_timing(
+            session_id,
+            "llm_response_completed_at",
+            question_id=current_q.id,
         )
         raw_text = response.content[0].text
         parsed = parse_xml_response(raw_text)
     except Exception as exc:
         logger.error("LLM call failed session=%s: %s", session_id, exc)
-        return "Thank you. Let me continue with the next question."
+        set_voice_field(session_id, "pending_answer_status", "failed")
+        transition_voice_state(
+            session_id,
+            "waiting_for_candidate_answer",
+            "llm_call_failed",
+            question_id=current_q.id,
+            error_reason=str(exc),
+        )
+        log_voice_event(
+            session_id,
+            "recovery_action",
+            recovery_action="llm_call_failed_reask_current_question",
+            error_reason=str(exc),
+            question_id=current_q.id,
+        )
+        return (
+            "I had trouble processing that answer. Please repeat your answer "
+            f"to the same question: {current_q.question_text}"
+        )
+
+    latest_voice_data = get_voice_session(session_id) or {}
+    latest_idx = int(latest_voice_data.get("current_question_idx", current_idx))
+    if latest_idx != current_idx:
+        set_voice_field(session_id, "pending_answer_status", "stale")
+        log_voice_event(
+            session_id,
+            "stale_async_ignored",
+            question_id=current_q.id,
+            stale_current_idx=current_idx,
+            latest_current_idx=latest_idx,
+        )
+        return "I am here. Let's continue from the current question."
+
+    set_voice_field(session_id, "pending_answer_status", "handled")
+    set_voice_field(session_id, "pending_answer_text", "")
 
     # --- Action routing ---
     action = _normalize_action(parsed.action)
@@ -303,6 +493,8 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
     # acknowledge_advance — the ONLY path that scores AND advances the index
     # -----------------------------------------------------------------------
     if action == "acknowledge_advance":
+        set_voice_field(session_id, "current_question_status", "completed")
+        set_voice_field(session_id, "last_completed_question_id", current_q.id)
         # Gather current running scores from voice_data (fresh at top of turn).
         scores: dict[str, float] = json.loads(voice_data.get("running_scores", "{}"))
 
@@ -359,6 +551,8 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
             )
 
         next_q = questions[next_idx]
+        set_voice_field(session_id, "current_question_id", next_q.id)
+        set_voice_field(session_id, "current_question_status", "waiting_for_answer")
         append_transcript_turn(session_id, "bot", next_q.question_text, entry_type="question")
         spoken = _acknowledgment_only(parsed.spoken_text) or "Thank you."
         return f"{spoken} {next_q.question_text}"
@@ -367,6 +561,7 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
     # follow_up — probe one missing rubric key point; no score yet
     # -----------------------------------------------------------------------
     elif action == "follow_up":
+        set_voice_field(session_id, "current_question_status", "waiting_for_answer")
         set_voice_field(session_id, "follow_up_count", follow_up_count + 1)
         set_voice_field(session_id, "non_advancing_turns", non_advancing + 1)
         fu_by_topic: dict[str, int] = json.loads(
@@ -387,6 +582,7 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
     # interview question; spoken_text kept VERBATIM (may contain a '?').
     # -----------------------------------------------------------------------
     elif action == "answer_clarification":
+        set_voice_field(session_id, "current_question_status", "waiting_for_answer")
         set_voice_field(session_id, "non_advancing_turns", non_advancing + 1)
         # Do NOT run _acknowledgment_only or validate_single_question here — the bot
         # is answering the candidate's clarifying question and may legitimately end
@@ -399,6 +595,7 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
     # accept_thinking — candidate asked for time; re-set grace flag
     # -----------------------------------------------------------------------
     elif action == "accept_thinking":
+        set_voice_field(session_id, "current_question_status", "waiting_for_answer")
         set_voice_field(session_id, "non_advancing_turns", non_advancing + 1)
         set_voice_field(session_id, "silence_grace_pending", "1")
         ack = parsed.spoken_text.strip() or "Of course — take your time."
@@ -409,6 +606,7 @@ async def run_llm_turn(session_id: str, transcript: str) -> str:
     # redirect — candidate went off-topic; steer back without scoring
     # -----------------------------------------------------------------------
     else:  # action == "redirect"
+        set_voice_field(session_id, "current_question_status", "waiting_for_answer")
         set_voice_field(session_id, "non_advancing_turns", non_advancing + 1)
         reply = parsed.spoken_text.strip() or "Let's come back to the question I asked."
         append_transcript_turn(session_id, "bot", reply, entry_type="redirect")
@@ -428,4 +626,9 @@ async def _trigger_final_evaluation(session_id: str) -> None:
         logger.error(
             "Voice evaluation failed session=%s: %s", session_id, exc
         )
-        set_voice_field(session_id, "state", "COMPLETE")
+        transition_voice_state(
+            session_id,
+            "complete",
+            "voice_evaluation_failed_fallback",
+            error_reason=str(exc),
+        )

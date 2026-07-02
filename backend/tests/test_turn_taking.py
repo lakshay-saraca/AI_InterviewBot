@@ -21,6 +21,7 @@ from src.routes.voice_ws import (
     _looks_complete,
     _looks_incomplete,
     _looks_wait_request,
+    _speech_end_should_flush,
 )
 from src.services.audio.voice_session import get_voice_session, set_voice_field
 
@@ -208,6 +209,106 @@ async def test_speech_start_cancels_silence_monitor(fake_ws: FakeWebSocket):
 
 
 @pytest.mark.asyncio
+async def test_transcript_activity_cancels_silence_monitor(fake_ws: FakeWebSocket):
+    """A Deepgram transcript proves the candidate is speaking, so the silence
+    ladder must stop — even when the browser VAD never sent speech_start.
+
+    This is the regression guard for the reported bug: the candidate spoke for
+    ~12s but the energy-fallback VAD missed speech_start, so the monitor was never
+    cancelled and the bot interrupted with 'Are you still there?'. _note_candidate_
+    activity must cancel the monitor on transcript regardless of the VAD signal.
+    """
+    session_id = "s-transcript-cancels-silence"
+    seed_voice_session(session_id, [make_question("q1", "python")])
+
+    from src.routes.voice_ws import _note_candidate_activity
+    from src.services.interview.voice_turn_processor import get_or_create_turn_state
+
+    turn_state = get_or_create_turn_state(session_id, fake_ws)
+    turn_state._start_silence_monitor()
+    assert turn_state._silence_task is not None
+
+    # Simulate Deepgram returning an interim partial while the candidate talks,
+    # with NO preceding speech_start control frame (the failure condition).
+    _note_candidate_activity(session_id, fake_ws)
+
+    assert turn_state._silence_task is None, (
+        "silence monitor must be cancelled the moment a transcript arrives — "
+        "otherwise the bot nags over a candidate the client VAD failed to detect"
+    )
+
+
+@pytest.mark.asyncio
+async def test_transcript_during_bot_speech_triggers_barge_in(fake_ws: FakeWebSocket):
+    """Deepgram hearing the candidate while the bot is mid-utterance must stop the
+    bot immediately.
+
+    This is the core fix for "the bot talks over me": barge-in previously fired
+    ONLY on the browser VAD's speech_start, which echo cancellation routinely
+    suppresses during double-talk (you + bot speaking at once). Deepgram returning
+    a transcript is the AEC-independent proof of a real interruption, so it must
+    cut the bot's TTS without waiting for the slow debounce -> process_voice_turn
+    path (seconds of overtalk).
+    """
+    session_id = "s-transcript-barge-in"
+    seed_voice_session(session_id, [make_question("q1", "python")])
+
+    from src.routes.voice_ws import _maybe_barge_in_on_transcript
+    from src.services.interview.voice_turn_processor import get_or_create_turn_state
+
+    turn_state = get_or_create_turn_state(session_id, fake_ws)
+    turn_state.bot_speaking = True  # bot mid-utterance
+
+    # Candidate interrupts; the browser VAD never sent speech_start (double-talk).
+    # last_flushed_text is empty: this is genuinely new speech, not a stale tail.
+    await _maybe_barge_in_on_transcript(
+        session_id, fake_ws, "actually wait I want to add something", ""
+    )
+
+    assert turn_state.bot_speaking is False, (
+        "a Deepgram transcript during bot speech must stop the bot — barge-in "
+        "cannot depend on the browser VAD it routinely misses in double-talk"
+    )
+    assert any(m.get("event") == "barge_in" for m in fake_ws.json_messages), (
+        "client must receive a barge_in stop_tts signal"
+    )
+
+
+@pytest.mark.asyncio
+async def test_trailing_tail_transcript_does_not_barge_in(fake_ws: FakeWebSocket):
+    """A late Deepgram final echoing the answer we just flushed must NOT cut the
+    bot's reply.
+
+    After the candidate stops and we flush their answer, the bot starts speaking.
+    Deepgram can still emit a trailing final for that same (already-processed)
+    utterance. Without a guard, that stale tail would barge-in and truncate the
+    bot's response — randomly swallowing questions. Only genuinely new speech may
+    interrupt.
+    """
+    session_id = "s-trailing-tail"
+    seed_voice_session(session_id, [make_question("q1", "python")])
+
+    from src.routes.voice_ws import _maybe_barge_in_on_transcript
+    from src.services.interview.voice_turn_processor import get_or_create_turn_state
+
+    turn_state = get_or_create_turn_state(session_id, fake_ws)
+    turn_state.bot_speaking = True
+
+    flushed = "I would use a hash map because lookups are constant time"
+    # A late final repeating the tail of what we already sent to the LLM.
+    await _maybe_barge_in_on_transcript(
+        session_id, fake_ws, "lookups are constant time", flushed
+    )
+
+    assert turn_state.bot_speaking is True, (
+        "a stale final echoing the just-flushed answer must not cut the bot's reply"
+    )
+    assert not any(m.get("event") == "barge_in" for m in fake_ws.json_messages), (
+        "no barge_in should be sent for a trailing tail of the flushed turn"
+    )
+
+
+@pytest.mark.asyncio
 async def test_tts_complete_opens_candidate_turn_and_starts_silence_monitor(
     fake_ws: FakeWebSocket,
 ):
@@ -332,9 +433,37 @@ class TestAdaptiveDebounce:
         assert DEBOUNCE_INCOMPLETE_SECS > DEBOUNCE_SECS, \
             "Incomplete phrase debounce should be longer than standard"
 
-    def test_standard_debounce_is_reasonable(self):
-        assert DEBOUNCE_SECS == 2.0, \
-            "Standard debounce should match the configured 2-second response wait"
+    def test_standard_debounce_tolerates_thinking_pause(self):
+        # Deepgram speech_final is now distinct from intermediate final segments,
+        # so the normal response timer can be much shorter without flushing every
+        # finalized sentence fragment.
+        assert 0.8 <= DEBOUNCE_SECS <= 1.5, \
+            "standard speech-final debounce should be short enough for conversational latency"
+
+
+class TestSpeechEndDeferral:
+    """The browser VAD's speech_end is a crude fixed-silence verdict. It must not
+    pre-empt the Deepgram-final-driven adaptive debounce and flush a mid-thought
+    partial — that was a direct cause of the bot talking over the candidate."""
+
+    def test_defers_to_pending_adaptive_debounce(self):
+        # The false-EOT bug: speech_end short-circuited a pending debounce (which
+        # may be holding 5s for incomplete-trailing text) and flushed early.
+        assert _speech_end_should_flush(debounce_pending=True, force=False) is False, \
+            "speech_end must let an in-flight adaptive debounce own EOT timing"
+
+    def test_flushes_interim_only_when_no_debounce(self):
+        # Deepgram produced only partials (no final → no debounce). speech_end is
+        # the safety net that keeps the turn from being stranded until the
+        # candidate speaks again.
+        assert _speech_end_should_flush(debounce_pending=False, force=False) is True, \
+            "speech_end must flush interim-only buffered text when nothing else will"
+
+    def test_session_end_force_flushes_even_with_pending_debounce(self):
+        # On end_session the candidate's last answer must reach the report even if
+        # a debounce is still mid-flight.
+        assert _speech_end_should_flush(debounce_pending=True, force=True) is True, \
+            "session end must force a flush so the final answer is not lost"
 
 
 # ---- Tests for confidence thresholds ----

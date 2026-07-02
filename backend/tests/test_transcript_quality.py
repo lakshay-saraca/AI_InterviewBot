@@ -179,10 +179,15 @@ class TestUserSpeechNotTruncated:
         """
         from src.services.audio.deepgram_client import DeepgramSTTStream
 
-        received: list[tuple[str, bool]] = []
+        received: list[tuple[str, bool, bool]] = []
 
-        async def mock_callback(text: str, is_final: bool, confidence: float) -> None:
-            received.append((text, is_final))
+        async def mock_callback(
+            text: str,
+            is_final: bool,
+            confidence: float,
+            speech_final: bool,
+        ) -> None:
+            received.append((text, is_final, speech_final))
 
         stream = DeepgramSTTStream(session_id="s-dg-test", on_transcript=mock_callback)
 
@@ -210,6 +215,9 @@ class TestUserSpeechNotTruncated:
             f"Intermediate is_final=True segment was passed as is_final=False. "
             f"voice_ws.py will NOT accumulate it — the sentence will be lost from the transcript."
         )
+        assert received[0][2] is False, (
+            "Intermediate finalized segments must not start the response debounce"
+        )
         assert received[0][0] == "I use decorators for caching."
 
     @pytest.mark.asyncio
@@ -218,10 +226,15 @@ class TestUserSpeechNotTruncated:
         the callback, triggering accumulation and the debounce flush."""
         from src.services.audio.deepgram_client import DeepgramSTTStream
 
-        received: list[tuple[str, bool]] = []
+        received: list[tuple[str, bool, bool]] = []
 
-        async def mock_callback(text: str, is_final: bool, confidence: float) -> None:
-            received.append((text, is_final))
+        async def mock_callback(
+            text: str,
+            is_final: bool,
+            confidence: float,
+            speech_final: bool,
+        ) -> None:
+            received.append((text, is_final, speech_final))
 
         stream = DeepgramSTTStream(session_id="s-dg-sf", on_transcript=mock_callback)
 
@@ -241,6 +254,7 @@ class TestUserSpeechNotTruncated:
 
         assert len(received) == 1
         assert received[0][1] is True, "speech_final result must be passed as is_final=True"
+        assert received[0][2] is True, "speech_final result must preserve speech_final=True"
         assert received[0][0] == "And this concludes my answer."
 
 
