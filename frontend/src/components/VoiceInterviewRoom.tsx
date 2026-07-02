@@ -257,177 +257,180 @@ export default function VoiceInterviewRoom({ sessionId, wsUrl }: Props) {
   }, [captureState, started, drawWaveform]);
 
   return (
-    <div className="max-w-2xl mx-auto space-y-5">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="text-xl">🎙</span>
-          <span className="font-semibold text-slate-800">Voice Interview</span>
-          <span className="text-xs text-slate-400 font-mono">
-            {sessionId.slice(0, 8)}…
-          </span>
-        </div>
-        {started && (
-          <button
-            onClick={handleStop}
-            disabled={ending}
-            className="text-sm text-red-600 hover:text-red-700 font-medium disabled:cursor-not-allowed disabled:text-slate-400"
-          >
-            {ending ? "Ending…" : "End Interview"}
-          </button>
-        )}
-      </div>
-
-      {/* Turn indicator */}
-      <div
-        className={`rounded-xl px-4 py-3 text-sm font-medium flex items-center gap-2 transition-colors ${STATE_COLORS[captureState]}`}
-      >
-        <span>
-          {captureState === "speaking"
-            ? "🔴"
-            : captureState === "bot_speaking"
-              ? "🔊"
-              : captureState === "processing"
-                ? "⏳"
-                : "⏸"}
-        </span>
-        {STATE_LABELS[captureState]}
-      </div>
-
-      {/* Waveform */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
-        <canvas
-          ref={canvasRef}
-          width={560}
-          height={80}
-          className="w-full h-20 rounded-lg bg-slate-50"
-        />
-      </div>
-
-      {/* Live transcript panel */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-100 text-xs font-medium text-slate-500 uppercase tracking-wide">
-          Transcript
-        </div>
-        <div className="p-4 space-y-3 max-h-72 overflow-y-auto">
-          {transcript.length === 0 && !liveText && (
-            <p className="text-sm text-slate-400 text-center py-4">
-              {started
-                ? "Conversation will appear here…"
-                : "Start the interview to begin."}
-            </p>
-          )}
-          {(() => {
-            const displayTranscript = transcript.filter(
-              (e) => e.type !== "silence_prompt",
-            );
-            const baseTime = displayTranscript[0]?.timestamp || 0;
-
-            const formatTime = (ts: number): string | null => {
-              if (!ts || !baseTime) return null;
-              const offset = Math.max(0, Math.floor((ts - baseTime) / 1000));
-              const mins = Math.floor(offset / 60);
-              const secs = offset % 60;
-              return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-            };
-
-            return displayTranscript.map((entry, i) => {
-              const prevSameSpeaker =
-                i > 0 && displayTranscript[i - 1]?.speaker === entry.speaker;
-              const timeLabel = formatTime(entry.timestamp);
-
-              // Type-based styling for bot entries
-              let typeClasses = "";
-              if (entry.type === "question") {
-                typeClasses = "font-medium border-l-2 border-violet-300 pl-2";
-              } else if (entry.type === "follow_up") {
-                typeClasses = "ml-2";
-              }
-
-              return (
-                <div
-                  key={i}
-                  className={`flex gap-2 ${entry.speaker === "bot" ? "" : "flex-row-reverse"} ${prevSameSpeaker ? "mt-1" : ""}`}
-                >
-                  {/* Avatar: show only for first entry in a consecutive same-speaker group */}
-                  {!prevSameSpeaker ? (
-                    <div
-                      className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${
-                        entry.speaker === "bot"
-                          ? "bg-violet-600 text-white"
-                          : "bg-green-600 text-white"
-                      }`}
-                    >
-                      {entry.speaker === "bot" ? "AI" : "You"}
-                    </div>
-                  ) : (
-                    <div className="w-7 flex-shrink-0" />
-                  )}
-                  <div className="flex flex-col gap-0.5 max-w-xs">
-                    <div
-                      className={`rounded-xl px-3 py-2 text-sm ${typeClasses} ${
-                        entry.speaker === "bot"
-                          ? "bg-violet-50 text-violet-900"
-                          : "bg-green-50 text-green-900"
-                      }`}
-                    >
-                      {entry.text}
-                    </div>
-                    {timeLabel && (
-                      <span
-                        className={`text-xs text-slate-400 ${entry.speaker === "bot" ? "ml-1" : "mr-1 text-right"}`}
-                      >
-                        {timeLabel}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              );
-            });
-          })()}
-          {liveText && (
-            <div className="flex gap-2 flex-row-reverse">
-              <div className="w-7 h-7 rounded-full bg-green-600 flex items-center justify-center text-xs font-bold text-white flex-shrink-0">
-                You
-              </div>
-              <div className="rounded-xl px-3 py-2 text-sm max-w-xs bg-green-50 text-green-700 italic opacity-80">
-                {liveText}
-              </div>
-            </div>
-          )}
-          <div ref={transcriptEndRef} />
-        </div>
-      </div>
-
-      {/* Error */}
-      {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">
-          {error}
-        </div>
-      )}
-
-      {/* Start button */}
-      {!started && (
-        <button
-          onClick={handleStart}
-          className="w-full bg-violet-600 hover:bg-violet-700 text-white font-semibold py-4 rounded-xl text-base transition-colors"
-        >
-          🎙 Start Voice Interview
-        </button>
-      )}
-
+    <div className="flex gap-4">
       <video
         ref={videoRef}
         autoPlay
         muted
         playsInline
-        className="w-full rounded-xl border border-slate-200"
+        className="w-[50%] rounded-xl border border-slate-200"
       />
+      <div className="max-w-2xl mx-auto space-y-5 ">
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="text-xl">🎙</span>
+            <span className="font-semibold text-slate-800">
+              Voice Interview
+            </span>
+            <span className="text-xs text-slate-400 font-mono">
+              {sessionId.slice(0, 8)}…
+            </span>
+          </div>
+          {started && (
+            <button
+              onClick={handleStop}
+              disabled={ending}
+              className="text-sm text-red-600 hover:text-red-700 font-medium disabled:cursor-not-allowed disabled:text-slate-400"
+            >
+              {ending ? "Ending…" : "End Interview"}
+            </button>
+          )}
+        </div>
 
-      <p className="text-xs text-slate-400 text-center">
-        Speak naturally. The AI will ask questions and respond with voice.
-        {started && " Interrupt the AI at any time by speaking."}
-      </p>
+        {/* Turn indicator */}
+        <div
+          className={`rounded-xl px-4 py-3 text-sm font-medium flex items-center gap-2 transition-colors ${STATE_COLORS[captureState]}`}
+        >
+          <span>
+            {captureState === "speaking"
+              ? "🔴"
+              : captureState === "bot_speaking"
+                ? "🔊"
+                : captureState === "processing"
+                  ? "⏳"
+                  : "⏸"}
+          </span>
+          {STATE_LABELS[captureState]}
+        </div>
+
+        {/* Waveform */}
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
+          <canvas
+            ref={canvasRef}
+            width={560}
+            height={80}
+            className="w-full h-20 rounded-lg bg-slate-50"
+          />
+        </div>
+
+        {/* Live transcript panel */}
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-100 text-xs font-medium text-slate-500 uppercase tracking-wide">
+            Transcript
+          </div>
+          <div className="p-4 space-y-3 max-h-72 overflow-y-auto">
+            {transcript.length === 0 && !liveText && (
+              <p className="text-sm text-slate-400 text-center py-4">
+                {started
+                  ? "Conversation will appear here…"
+                  : "Start the interview to begin."}
+              </p>
+            )}
+            {(() => {
+              const displayTranscript = transcript.filter(
+                (e) => e.type !== "silence_prompt",
+              );
+              const baseTime = displayTranscript[0]?.timestamp || 0;
+
+              const formatTime = (ts: number): string | null => {
+                if (!ts || !baseTime) return null;
+                const offset = Math.max(0, Math.floor((ts - baseTime) / 1000));
+                const mins = Math.floor(offset / 60);
+                const secs = offset % 60;
+                return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+              };
+
+              return displayTranscript.map((entry, i) => {
+                const prevSameSpeaker =
+                  i > 0 && displayTranscript[i - 1]?.speaker === entry.speaker;
+                const timeLabel = formatTime(entry.timestamp);
+
+                // Type-based styling for bot entries
+                let typeClasses = "";
+                if (entry.type === "question") {
+                  typeClasses = "font-medium border-l-2 border-violet-300 pl-2";
+                } else if (entry.type === "follow_up") {
+                  typeClasses = "ml-2";
+                }
+
+                return (
+                  <div
+                    key={i}
+                    className={`flex gap-2 ${entry.speaker === "bot" ? "" : "flex-row-reverse"} ${prevSameSpeaker ? "mt-1" : ""}`}
+                  >
+                    {/* Avatar: show only for first entry in a consecutive same-speaker group */}
+                    {!prevSameSpeaker ? (
+                      <div
+                        className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${
+                          entry.speaker === "bot"
+                            ? "bg-violet-600 text-white"
+                            : "bg-green-600 text-white"
+                        }`}
+                      >
+                        {entry.speaker === "bot" ? "AI" : "You"}
+                      </div>
+                    ) : (
+                      <div className="w-7 flex-shrink-0" />
+                    )}
+                    <div className="flex flex-col gap-0.5 max-w-xs">
+                      <div
+                        className={`rounded-xl px-3 py-2 text-sm ${typeClasses} ${
+                          entry.speaker === "bot"
+                            ? "bg-violet-50 text-violet-900"
+                            : "bg-green-50 text-green-900"
+                        }`}
+                      >
+                        {entry.text}
+                      </div>
+                      {timeLabel && (
+                        <span
+                          className={`text-xs text-slate-400 ${entry.speaker === "bot" ? "ml-1" : "mr-1 text-right"}`}
+                        >
+                          {timeLabel}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              });
+            })()}
+            {liveText && (
+              <div className="flex gap-2 flex-row-reverse">
+                <div className="w-7 h-7 rounded-full bg-green-600 flex items-center justify-center text-xs font-bold text-white flex-shrink-0">
+                  You
+                </div>
+                <div className="rounded-xl px-3 py-2 text-sm max-w-xs bg-green-50 text-green-700 italic opacity-80">
+                  {liveText}
+                </div>
+              </div>
+            )}
+            <div ref={transcriptEndRef} />
+          </div>
+        </div>
+
+        {/* Error */}
+        {error && (
+          <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">
+            {error}
+          </div>
+        )}
+
+        {/* Start button */}
+        {!started && (
+          <button
+            onClick={handleStart}
+            className="w-full bg-violet-600 hover:bg-violet-700 text-white font-semibold py-4 rounded-xl text-base transition-colors"
+          >
+            🎙 Start Voice Interview
+          </button>
+        )}
+
+        <p className="text-xs text-slate-400 text-center">
+          Speak naturally. The AI will ask questions and respond with voice.
+          {started && " Interrupt the AI at any time by speaking."}
+        </p>
+      </div>
     </div>
   );
 }
